@@ -34,14 +34,23 @@ globalThis.localStorage = localStorageStub
 // position 'bottom-right' is a legacy corner preset — apply() must migrate it.
 storage.set('dsh-usage.config', JSON.stringify({ token: 'tok-saved', apiKey: 'sk-saved', position: 'bottom-right' }))
 
-// window stub: innerWidth/innerHeight for the default float position, and
+// window stub: innerWidth/innerHeight for the default float position, captured
+// timers (the client uses window.setTimeout for the delayed hover-expand), and
 // event-listener capture so the drag handlers can be driven manually.
 const winListeners = {}
+const winTimers = new Map()
+let winTimerId = 0
 globalThis.window = {
   innerWidth: 1280,
   innerHeight: 800,
   addEventListener: (type, fn) => { winListeners[type] = fn },
   removeEventListener: (type) => { delete winListeners[type] },
+  setTimeout: (fn) => { const id = ++winTimerId; winTimers.set(id, fn); return id },
+  clearTimeout: (id) => { winTimers.delete(id) },
+}
+function flushTimers() {
+  for (const fn of [...winTimers.values()]) fn()
+  winTimers.clear()
 }
 
 // A minimal stateful React stub: useState persists per (component, hook index)
@@ -163,15 +172,28 @@ async function main() {
   check('position migrated to float', JSON.parse(storage.get('dsh-usage.config') || '{}').position, 'float')
   check('default float position near right edge', f0.props.style.left, '1200px')
 
-  console.log('· hover wiring on the floating widget')
-  check('mouseenter expands', typeof f0.props.onMouseEnter, 'function')
+  console.log('· delayed hover: expands only after the timer fires, collapses on leave')
+  check('mouseenter schedules expand', typeof f0.props.onMouseEnter, 'function')
   check('mouseleave collapses', typeof f0.props.onMouseLeave, 'function')
   f0.props.onMouseEnter()
+  check('hover does NOT expand instantly', flatChildren(render(Float)).some(c => c.props && c.props.className === 'dshup-card'), false)
+  flushTimers()
   const f1 = render(Float)
-  check('card appears on hover', flatChildren(f1).some(c => c.props && c.props.className === 'dshup-card'), true)
+  check('card appears after hover delay', flatChildren(f1).some(c => c.props && c.props.className === 'dshup-card'), true)
   f1.props.onMouseLeave()
   const f2 = render(Float)
   check('card hides on leave', flatChildren(f2).some(c => c.props && c.props.className === 'dshup-card'), false)
+
+  console.log('· press cancels pending hover (press = intent to drag)')
+  const fHover = render(Float)
+  const btnHover = flatChildren(fHover).find(c => c.props && c.props.className === 'dshup-whale-btn')
+  fHover.props.onMouseEnter()
+  check('hover timer scheduled', winTimers.size, 1)
+  btnHover.props.onMouseDown({ button: 0, clientX: 10, clientY: 10, preventDefault() {}, stopPropagation() {} })
+  check('mousedown cancels pending hover timer', winTimers.size, 0)
+  flushTimers()
+  check('no expand after cancelled hover + timer flush', flatChildren(render(Float)).some(c => c.props && c.props.className === 'dshup-card'), false)
+  winListeners.mouseup({}) // close the press without movement; nothing persists
 
   console.log('· drag: mousedown -> mousemove -> mouseup moves and persists the position')
   const fDrag = render(Float)
@@ -179,18 +201,24 @@ async function main() {
   check('whale button present', whaleBtn !== undefined, true)
   check('whale icon rendered', flatChildren(whaleBtn).some(c => c.type && c.type.name === 'WhaleIcon'), true)
   check('whale button has mousedown handler', typeof whaleBtn.props.onMouseDown, 'function')
-  whaleBtn.props.onMouseDown({ button: 0, clientX: 100, clientY: 100, preventDefault() {} })
+  whaleBtn.props.onMouseDown({ button: 0, clientX: 100, clientY: 100, preventDefault() {}, stopPropagation() {} })
   check('window mousemove listener attached', typeof winListeners.mousemove, 'function')
   winListeners.mousemove({ clientX: 160, clientY: 130 })
   const fMoved = render(Float)
   // x is clamped to viewport width - 40: 1200 + 60 = 1260 -> 1240.
   check('position updated while dragging', fMoved.props.style.left, '1240px')
   check('dragging class applied', fMoved.props.className.includes('dshup-dragging'), true)
+  check('bottom-half position opens card upward (no column-reverse)', fMoved.props.className.includes('dshup-open-up'), false)
+  // Drag the widget to the top half of the viewport: the card must flip to
+  // open downward (column-reverse) so it never runs off-screen.
+  winListeners.mousemove({ clientX: 160, clientY: -500 })
+  const fTop = render(Float)
+  check('top-half position flips card direction', fTop.props.className.includes('dshup-open-up'), true)
   winListeners.mouseup({})
   check('listeners cleaned up', winListeners.mousemove === undefined, true)
   const saved = JSON.parse(storage.get('dsh-usage.config') || '{}')
   check('position persisted on mouseup', saved.floatX, 1240)
-  check('position persisted on mouseup (y)', saved.floatY, 690)
+  check('position persisted on mouseup (y)', saved.floatY, 60)
   // A drag must not toggle the expanded card.
   const fAfterDrag = render(Float)
   check('drag did not expand', flatChildren(fAfterDrag).some(c => c.props && c.props.className === 'dshup-card'), false)
@@ -200,6 +228,7 @@ async function main() {
   console.log('· position switch to dock')
   const f3 = render(Float)
   f3.props.onMouseEnter()
+  flushTimers()
   const f4 = render(Float)
   // Detail is a function component the stub does not auto-render; render it once
   // to reach the position <select>.

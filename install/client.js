@@ -408,20 +408,39 @@ function UsageDock() {
   return React.createElement('div', null, children)
 }
 
-// Floating variant: a draggable whale badge. Hover expands the card (suppressed
-// while dragging); dragging never toggles; the position persists on mouseup.
+// Floating variant: a draggable whale badge. Hovering (350ms) expands the card;
+// PRESSING the badge cancels any pending expand — press-and-hold is a drag, so
+// a drag never triggers the card. Clicking (without moving) toggles; the drag
+// position persists on mouseup.
 function UsageFloat() {
   const s = useStore()
   const [expanded, setExpanded] = React.useState(false)
   const dragRef = React.useRef({ sx: 0, sy: 0, ox: 0, oy: 0, moved: false })
+  const hoverTimer = React.useRef(null)
   if (s.position !== 'float') return null
 
   const pos = s.floatPos || defaultFloatPos()
   const openUp = pos.y > (window.innerHeight || 800) / 2
 
+  const scheduleExpand = () => {
+    if (hoverTimer.current !== null || s.dragging) return
+    hoverTimer.current = window.setTimeout(() => {
+      hoverTimer.current = null
+      setExpanded(true)
+    }, 350)
+  }
+  const cancelExpand = () => {
+    if (hoverTimer.current !== null) {
+      window.clearTimeout(hoverTimer.current)
+      hoverTimer.current = null
+    }
+  }
+
   const onPillMouseDown = (e) => {
     if (e.button !== 0) return
     e.preventDefault()
+    e.stopPropagation()
+    cancelExpand() // pressing the badge means "maybe drag" — never expand now
     const base = s.floatPos || defaultFloatPos()
     const d = dragRef.current
     d.sx = e.clientX
@@ -461,13 +480,14 @@ function UsageFloat() {
       React.createElement(Detail, { data: s.data })))
   }
   // A lone whale badge: no pill, no text — just the icon (plus a tiny status
-  // dot at its corner). Hover expands the card; drag moves the widget.
+  // dot at its corner). Hover (delayed) expands the card; press-and-hold drags.
   children.push(React.createElement('div', {
     key: 'btn',
     className: 'dshup-whale-btn',
+    draggable: false,
     onMouseDown: onPillMouseDown,
     onClick: () => { if (!dragRef.current.moved) setExpanded(!expanded) },
-    title: 'DeepSeek API 用量（悬停查看，按住拖动）',
+    title: 'DeepSeek API 用量（点击展开，按住拖动）',
   },
     React.createElement('span', { className: 'dshup-whale' },
       React.createElement(WhaleIcon, { size: 40 }),
@@ -476,10 +496,10 @@ function UsageFloat() {
   ))
 
   return React.createElement('div', {
-    className: 'dshup-float' + (s.dragging ? ' dshup-dragging' : '') + (openUp ? ' dshup-open-up' : ''),
+    className: 'dshup-float' + (s.dragging ? ' dshup-dragging' : '') + (!openUp ? ' dshup-open-up' : ''),
     style: { left: pos.x + 'px', top: pos.y + 'px' },
-    onMouseEnter: () => { if (!s.dragging) setExpanded(true) },
-    onMouseLeave: () => setExpanded(false),
+    onMouseEnter: scheduleExpand,
+    onMouseLeave: () => { cancelExpand(); setExpanded(false) },
   }, children)
 }
 

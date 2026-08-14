@@ -1,24 +1,36 @@
 /**
- * DeepSeek Usage Panel — CLIENT half (browser).
+ * DeepSeek Usage Panel — CLIENT half (browser). Dashboard v6.
  *
  * Runs as the body of an async function in the page; closure symbols are
  * React, console, styles, host (no imports, no JSX, no global timers).
  *
- * Two placement modes, user-selectable and remembered in localStorage:
- *   - 'float' -> a whale-badge floating widget you can DRAG anywhere with the
- *                mouse; its position (left/top) is persisted. Hovering the
- *                widget auto-expands the full detail card; clicking the badge
- *                toggles it too (drag is suppressed so dragging never toggles).
- *   - 'dock'  -> a readout line in the band under the composer
- *                (slot `conversation.composer.dock`).
- * The floating widget lives in the frame-wide `shell.overlay` slot (root
- * scope: visible with or without a session).
- *
- * The host half owns all network access; this half polls
- * `host.call('snapshot')` every 2s, keeps the user's platform userToken /
- * API key / position in localStorage, and pushes secrets to the host with
- * `host.call('setConfig', …)`.
+ * Features:
+ *   - Time-range selector: 今日 / 昨日 / 本周 / 本月. Each range shows the
+ *     complete info set (cost hero, request/hit-rate/output chips, token-mix
+ *     meters, per-model bars) computed host-side (`platform.ranges`).
+ *   - Token-consumption chart with granularity matched to the range: hour
+ *     buckets for 今日/昨日 (from the DSH session's own hourly buckets —
+ *     the platform only exposes day granularity), day buckets for 本周/本月
+ *     (from `platform.days`). Stacked bars: cache-hit input / cache-miss
+ *     input / output.
+ *   - Floating whale badge (draggable, 350ms hover-expand) or composer dock.
+ *   - Config form (userToken / API key), balance card, DSH live stats.
+ * All UI is hand-rolled React.createElement + inline SVG + plain CSS.
  */
+
+// ---- palette (DeepSeek 开放平台品牌风格,主色 #4D6BFE) ----
+// 用量构成三色:平台浅蓝基础上整体加深一档(原 #b9d9fa+67%白 / #73b2f5+33%白 / #509ff3+17%白 太接近背景色)
+const C_HIT = '#D8EAFC' // 输入·缓存命中 (加深: 原 #E8F2FD)
+const C_MISS = '#8FC1F7' // 输入·缓存未命中 (加深: 原 #A1CBF8)
+const C_OUT = '#5FA7F4' // 输出 (加深: 原 #6EAFF5)
+const C_WARN = '#F59E0B' // amber 琥珀: 金额
+
+const RANGES = [
+  { k: 'today', label: '今日' },
+  { k: 'yesterday', label: '昨日' },
+  { k: 'week', label: '本周' },
+  { k: 'month', label: '本月' },
+]
 
 // ---- store: snapshot + config facts + placement + input drafts ----
 let state = {
@@ -64,8 +76,6 @@ async function refreshConfig() {
     const cfg = await host.call('getConfig')
     if (cfg && typeof cfg === 'object') {
       setState({ config: cfg })
-      // Self-heal: if the host lost the token (e.g. the host half restarted),
-      // re-send the saved config from the browser.
       const saved = readSaved()
       if (!cfg.hasToken && (saved.token || saved.apiKey)) {
         host.call('setConfig', { token: saved.token || '', apiKey: saved.apiKey || '' }).catch(() => {})
@@ -97,7 +107,6 @@ function setPosition(pos) {
   writeSaved({ position: pos })
   setState({ position: pos })
 }
-// Default corner when the user has never dragged the widget: right edge.
 function defaultFloatPos() {
   const w = window.innerWidth || 1280
   const h = window.innerHeight || 800
@@ -112,6 +121,10 @@ function savedFloatPos() {
 }
 
 // ---- formatting ----
+function pad2(n) { return n < 10 ? '0' + n : '' + n }
+function localDateKeyOf(d) {
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+}
 function fmtInt(n) {
   const v = Math.round(Number(n) || 0)
   return ('' + v).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
@@ -148,21 +161,10 @@ const CSS = `
 .dshup-dot-ok { background: var(--dsw-alias-state-success-primary); }
 .dshup-dot-warn { background: var(--dsw-alias-state-error-primary); }
 .dshup-caret { opacity: .6; }
-.dshup-panel {
-  margin: 6px 0 4px; padding: 10px 12px; border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1);
-  font-size: 12px; color: var(--dsw-alias-label-secondary); max-height: 60vh; overflow: auto;
-}
-.dshup-sec { margin: 8px 0 2px; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.dshup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 4px 12px; }
-.dshup-grid div { display: flex; justify-content: space-between; gap: 8px; }
-.dshup-grid b { color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; font-weight: 600; }
-.dshup-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 11.5px; }
-.dshup-table th, .dshup-table td { text-align: right; padding: 2px 6px; border-bottom: 1px solid var(--dsw-alias-border-l1); font-variant-numeric: tabular-nums; }
-.dshup-table th:first-child, .dshup-table td:first-child { text-align: left; }
-.dshup-table th { color: var(--dsw-alias-label-secondary); font-weight: 500; }
+.dshup-hint { opacity: .75; font-size: 11px; }
 .dshup-err { color: var(--dsw-alias-state-error-primary); margin-top: 4px; word-break: break-all; }
 .dshup-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.dshup-form-row { flex-direction: row; }
 .dshup-form label { display: flex; flex-direction: column; gap: 2px; }
 .dshup-form input, .dshup-form select {
   background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
@@ -174,7 +176,7 @@ const CSS = `
   border: 1px solid var(--dsw-alias-border-l2);
 }
 .dshup-btn:hover { border-color: var(--dsw-alias-brand-primary); }
-.dshup-hint { opacity: .75; font-size: 11px; }
+.dshup-btn-primary { background: var(--dsw-alias-brand-primary); border-color: transparent; color: #fff; font-weight: 600; }
 /* floating widget (draggable) */
 .dshup-float {
   position: fixed; z-index: 900; pointer-events: auto;
@@ -183,8 +185,12 @@ const CSS = `
   cursor: grab; touch-action: none;
 }
 .dshup-float.dshup-dragging { cursor: grabbing; }
-/* Near the bottom of the viewport the detail card opens upward (above the pill). */
-.dshup-float.dshup-open-up { flex-direction: column-reverse; }
+/* card opens toward the free space: upward/downward + leftward/rightward */
+.dshup-float .dshup-card { position: absolute; }
+.dshup-oc-up .dshup-card { bottom: calc(100% + 8px); }
+.dshup-oc-down .dshup-card { top: calc(100% + 8px); }
+.dshup-oc-left .dshup-card { right: 0; }
+.dshup-oc-right .dshup-card { left: 0; }
 .dshup-whale-btn {
   display: flex; align-items: center; justify-content: center;
   padding: 4px; cursor: grab; user-select: none;
@@ -197,13 +203,457 @@ const CSS = `
   border: 2px solid var(--dsw-alias-bg-base);
 }
 .dshup-card {
-  padding: 10px 12px; border-radius: 10px; width: min(430px, calc(100vw - 36px));
+  padding: 12px 14px; border-radius: 12px; width: min(480px, calc(100vw - 32px));
   background: var(--dsw-alias-bg-overlay); border: 1px solid var(--dsw-alias-border-l1);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .18); max-height: min(70vh, 620px); overflow: auto;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .18); max-height: min(80vh, 720px); overflow: auto;
 }
+/* ---- dashboard panel ---- */
+.dshup-panel { display: flex; flex-direction: column; gap: 12px; padding: 6px 4px 0; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.dshup-ranges { display: flex; gap: 6px; padding: 4px; border-radius: 10px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); }
+.dshup-range {
+  flex: 1; cursor: pointer; border: none; background: transparent; color: var(--dsw-alias-label-secondary);
+  font-size: 12px; padding: 6px 0; border-radius: 8px; font-weight: 500;
+}
+.dshup-range:hover { color: var(--dsw-alias-label-primary); }
+.dshup-range-on { background: var(--dsw-alias-brand-primary); color: #fff !important; }
+.dshup-hero {
+  display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; border-radius: 12px;
+  background: linear-gradient(135deg, rgba(77, 107, 254, .18), rgba(139, 92, 246, .08));
+  border: 1px solid var(--dsw-alias-border-l1);
+}
+.dshup-hero-label { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dshup-hero-num { font-size: 26px; font-weight: 700; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.dshup-chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.dshup-chip {
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 9px;
+  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); min-width: 0;
+}
+.dshup-chip-ic { display: flex; color: var(--dsw-alias-label-secondary); }
+.dshup-chip b { font-size: 13.5px; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshup-chip span:last-child { font-size: 10.5px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.dshup-sec { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; color: var(--dsw-alias-label-primary); }
+.dshup-sec-ic { display: flex; color: var(--dsw-alias-brand-primary); }
+.dshup-head { display: flex; align-items: center; gap: 8px; }
+.dshup-head-title { font-weight: 700; font-size: 13px; color: var(--dsw-alias-label-primary); }
+.dshup-head-spacer { flex: 1; }
+.dshup-gear { display: flex; align-items: center; justify-content: center; cursor: pointer; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 5px; color: var(--dsw-alias-label-secondary); }
+.dshup-gear:hover { color: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.dshup-helpzone { position: relative; display: inline-flex; align-items: center; }
+.dshup-help { display: flex; align-items: center; justify-content: center; cursor: pointer; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 700; line-height: 1; padding: 0; }
+.dshup-help:hover { color: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.dshup-tutorial { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: 300px; max-width: calc(100vw - 60px); padding: 10px 12px; border-radius: 10px; background: var(--dsw-alias-bg-overlay); border: 1px solid var(--dsw-alias-border-l1); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); display: flex; flex-direction: column; gap: 4px; }
+.dshup-tutorial-title { font-weight: 700; font-size: 12px; color: var(--dsw-alias-label-primary); margin-bottom: 2px; }
+.dshup-step { font-size: 11px; color: var(--dsw-alias-label-secondary); line-height: 1.5; }
+.dshup-step b { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-brand-primary); color: #fff; font-size: 10px; margin-right: 4px; }
+.dshup-badge { margin-left: auto; font-size: 10px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-secondary); }
+.dshup-meters { display: flex; flex-direction: column; gap: 12px; padding: 0 16px; }
+.dshup-meter { display: flex; flex-direction: column; gap: 6px; }
+.dshup-meter-top { display: flex; justify-content: space-between; font-size: 11.5px; gap: 12px; }
+.dshup-meter-label { color: var(--dsw-alias-label-secondary); }
+.dshup-meter-val { color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
+.dshup-meter-track { height: 8px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); overflow: hidden; }
+.dshup-meter-fill { height: 100%; border-radius: 999px; transition: width .3s; }
+.dshup-chart { padding: 12px 14px 8px; border-radius: 12px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); }
+.dshup-chart-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 11.5px; font-weight: 600; color: var(--dsw-alias-label-primary); margin-bottom: 8px; }
+.dshup-axis { font-size: 8px; fill: var(--dsw-alias-label-secondary); }
+.dshup-legend { display: flex; gap: 12px; font-size: 10px; color: var(--dsw-alias-label-secondary); align-items: center; }
+.dshup-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.dshup-legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.dshup-models { display: flex; flex-direction: column; gap: 14px; padding: 0 16px; }
+.dshup-model { display: flex; flex-direction: column; gap: 6px; }
+.dshup-model-head { display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; }
+.dshup-model-name { color: var(--dsw-alias-label-primary); max-width: 62%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshup-model-track { height: 6px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); overflow: hidden; }
+.dshup-model-fill { height: 100%; background: linear-gradient(90deg, #4D6BFE, #8B5CF6); border-radius: 999px; }
+.dshup-model-meta { display: flex; gap: 14px; font-size: 10.5px; color: var(--dsw-alias-label-secondary); }
+.dshup-model-meta span { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
+.dshup-cta {
+  display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 12px;
+  border: 1px dashed var(--dsw-alias-brand-primary); background: rgba(77, 107, 254, .08);
+}
+.dshup-cta-ic { display: flex; color: var(--dsw-alias-brand-primary); flex: none; }
+.dshup-cta-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.dshup-cta-body b { font-size: 12.5px; color: var(--dsw-alias-label-primary); }
+.dshup-cta-body span { font-size: 11px; color: var(--dsw-alias-label-secondary); word-break: break-all; }
+.dshup-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
+.dshup-meta .dshup-err { margin-top: 0; }
+.dshup-cfg-open { outline: 1px solid var(--dsw-alias-brand-primary); border-radius: 8px; padding: 8px; }
 `
 
-// ---- React components ----
+// ---- icons (feather-style inline SVG) ----
+function SvgIcon(props) {
+  const size = props.size || 16
+  return React.createElement('svg', {
+    viewBox: '0 0 24 24', width: size, height: size, fill: 'none',
+    stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+    'aria-hidden': true, focusable: 'false',
+  }, props.children)
+}
+const IconReq = () => SvgIcon({ children: React.createElement('polyline', { points: '22 12 18 12 15 21 9 3 6 12 2 12' }) })
+const IconIn = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' }),
+  React.createElement('polyline', { points: '7 10 12 15 17 10' }),
+  React.createElement('line', { x1: '12', y1: '15', x2: '12', y2: '3' })) })
+const IconCache = () => SvgIcon({ children: React.createElement('polygon', { points: '13 2 3 14 12 14 11 22 21 10 12 10 13 2' }) })
+const IconOut = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('polyline', { points: '17 8 12 3 7 8' }),
+  React.createElement('line', { x1: '12', y1: '3', x2: '12', y2: '15' }),
+  React.createElement('path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' })) })
+const IconCost = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('line', { x1: '12', y1: '1', x2: '12', y2: '23' }),
+  React.createElement('path', { d: 'M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6' })) })
+const IconWallet = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('rect', { x: '1', y: '4', width: '22', height: '16', rx: '2', ry: '2' }),
+  React.createElement('line', { x1: '1', y1: '10', x2: '23', y2: '10' })) })
+const IconRefresh = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('polyline', { points: '23 4 23 10 17 10' }),
+  React.createElement('path', { d: 'M20.49 15a9 9 0 1 1-2.12-9.36L23 10' })) })
+const IconClock = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('circle', { cx: '12', cy: '12', r: '10' }),
+  React.createElement('polyline', { points: '12 6 12 12 16 14' })) })
+const IconBolt = () => SvgIcon({ children: React.createElement('polygon', { points: '13 2 3 14 12 14 11 22 21 10 12 10 13 2' }) })
+const IconTrend = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('polyline', { points: '23 6 13.5 15.5 8.5 10.5 1 18' }),
+  React.createElement('polyline', { points: '17 6 23 6 23 12' })) })
+const IconCard = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('rect', { x: '2', y: '5', width: '20', height: '14', rx: '2' }),
+  React.createElement('line', { x1: '2', y1: '10', x2: '22', y2: '10' })) })
+const IconGear = () => SvgIcon({ children: React.createElement(React.Fragment, null,
+  React.createElement('circle', { cx: '12', cy: '12', r: '3' }),
+  React.createElement('path', { d: 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z' })) })
+
+// ---- small building blocks ----
+function StatChip(props) {
+  return React.createElement('div', { className: 'dshup-chip' },
+    React.createElement('span', { className: 'dshup-chip-ic', style: { color: props.color } }, props.icon),
+    React.createElement('b', null, props.value),
+    React.createElement('span', null, props.label))
+}
+function Sec(props) {
+  return React.createElement('div', { className: 'dshup-sec' },
+    props.icon ? React.createElement('span', { className: 'dshup-sec-ic' }, props.icon) : null,
+    React.createElement('span', null, props.title),
+    props.badge ? React.createElement('span', { className: 'dshup-badge' }, props.badge) : null)
+}
+function Meter(props) {
+  const pct = props.total > 0 ? Math.round((props.value / props.total) * 100) : 0
+  return React.createElement('div', { className: 'dshup-meter' },
+    React.createElement('div', { className: 'dshup-meter-top' },
+      React.createElement('span', { className: 'dshup-meter-label' }, props.label),
+      React.createElement('span', { className: 'dshup-meter-val' }, props.fmt(props.value) + ' · ' + pct + '%')),
+    React.createElement('div', { className: 'dshup-meter-track' },
+      React.createElement('div', { className: 'dshup-meter-fill', style: { width: Math.min(100, pct) + '%', background: props.color } })))
+}
+// Stacked token-consumption bars: cache-hit input / cache-miss input / output.
+function TokenChart(props) {
+  const { buckets, unit, sourceNote } = props
+  if (!buckets || buckets.length === 0) {
+    return React.createElement('div', { className: 'dshup-hint' }, '该时间段暂无 Token 消耗数据')
+  }
+  const W = 380
+  const H = 150
+  const plotTop = 8
+  const plotBottom = H - 22
+  const plotH = plotBottom - plotTop
+  const max = buckets.reduce((m, b) => Math.max(m, (b.cacheHit || 0) + (b.cacheMiss || 0) + (b.output || 0)), 0) || 1
+  const step = (W - 8) / buckets.length
+  const bw = Math.max(3, Math.min(16, step - 3))
+  const bars = []
+  const labels = []
+  buckets.forEach((b, i) => {
+    const x = 4 + i * step + (step - bw) / 2
+    let y = plotBottom
+    const seg = (val, color) => {
+      const h = val > 0 ? Math.max(2, (val / max) * plotH) : 0
+      if (h > 0) {
+        bars.push(React.createElement('rect', { key: 'b' + i + color, x: x, y: y - h, width: bw, height: h, rx: 1, fill: color },
+          React.createElement('title', null, b.x + '  命中 ' + fmtTokens(b.cacheHit) + ' · 未命中 ' + fmtTokens(b.cacheMiss) + ' · 输出 ' + fmtTokens(b.output))))
+        y -= h
+      }
+    }
+    seg(b.cacheHit || 0, C_HIT)
+    seg(b.cacheMiss || 0, C_MISS)
+    seg(b.output || 0, C_OUT)
+    if (i === 0 || i === buckets.length - 1 || i === Math.floor((buckets.length - 1) / 2)) {
+      labels.push(React.createElement('text', { key: 't' + i, x: x + bw / 2, y: H - 6, textAnchor: 'middle', className: 'dshup-axis' }, b.x))
+    }
+  })
+  return React.createElement('div', { className: 'dshup-chart' },
+    React.createElement('div', { className: 'dshup-chart-head' },
+      React.createElement('span', null, 'Token 消耗（' + unit + '）'),
+      React.createElement('span', { className: 'dshup-legend' },
+        React.createElement('span', null, React.createElement('i', { style: { background: C_HIT } }), '命中'),
+        React.createElement('span', null, React.createElement('i', { style: { background: C_MISS } }), '未命中'),
+        React.createElement('span', null, React.createElement('i', { style: { background: C_OUT } }), '输出'))),
+    React.createElement('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', preserveAspectRatio: 'none' }, bars, labels),
+    sourceNote ? React.createElement('div', { className: 'dshup-hint' }, sourceNote) : null)
+}
+function ModelRows(props) {
+  const { byModel, currency } = props
+  const list = byModel || []
+  if (list.length === 0) {
+    return React.createElement('div', { className: 'dshup-hint' }, '该时间段暂无模型数据')
+  }
+  const maxCost = list.reduce((m, x) => Math.max(m, x.cost || 0), 0) || 1
+  return React.createElement('div', { className: 'dshup-models' },
+    list.map((m) => React.createElement('div', { key: m.model, className: 'dshup-model' },
+      React.createElement('div', { className: 'dshup-model-head' },
+        React.createElement('span', { className: 'dshup-model-name', title: m.model }, m.model),
+        React.createElement('span', { className: 'dshup-accent' }, fmtMoney(m.cost, currency))),
+      React.createElement('div', { className: 'dshup-model-track' },
+        React.createElement('div', { className: 'dshup-model-fill', style: { width: Math.max(2, Math.round((m.cost / maxCost) * 100)) + '%' } })),
+      React.createElement('div', { className: 'dshup-model-meta' },
+        React.createElement('span', null, React.createElement(IconReq, null), fmtInt(m.requests)),
+        React.createElement('span', null, React.createElement(IconCache, null), fmtTokens(m.cacheHit)),
+        React.createElement('span', null, React.createElement(IconOut, null), fmtTokens(m.output))))))
+}
+
+// ---- chart series helpers ----
+// Hour buckets for a day from DSH session data (today up to current hour).
+function localHourSeries(local, dateKey) {
+  const hours = (local && local.hours) || []
+  const now = new Date()
+  const maxH = dateKey === localDateKeyOf(now) ? now.getHours() : 23
+  const out = []
+  for (let h = 0; h <= maxH; h++) {
+    const hh = pad2(h)
+    const hit = hours.find((x) => x.date === dateKey && x.h === hh)
+    out.push({
+      x: hh + ':00',
+      cacheHit: hit ? hit.cacheHit : 0,
+      cacheMiss: hit ? hit.input : 0,
+      output: hit ? hit.output : 0,
+    })
+  }
+  return out
+}
+// Day buckets from platform data, scoped to the ACTUAL selected range
+// (calendar week / current month) so the chart x-axis matches the summary.
+function platformDaySeries(p, range) {
+  const days = (p && p.days) || []
+  let list = days
+  if (range === 'week' && p.weekStart && p.weekEnd) {
+    list = days.filter((d) => d.full >= p.weekStart && d.full <= p.weekEnd)
+  } else if (range === 'month' && p.monthPrefix) {
+    list = days.filter((d) => d.full.indexOf(p.monthPrefix) === 0)
+  }
+  return list.map((d) => ({
+    x: d.date,
+    cacheHit: d.cacheHit || 0,
+    cacheMiss: d.cacheMiss || 0,
+    output: d.output || 0,
+  }))
+}
+
+// ---- dashboard detail ----
+function Detail(props) {
+  const { data } = props
+  const s = useStore()
+  const config = s.config
+  const position = s.position
+  const draft = s.draft
+  const [saved, setSaved] = React.useState(false)
+  const [saveMsg, setSaveMsg] = React.useState('')
+  const [view, setView] = React.useState('info') // 'info' | 'settings'
+  const [helpOpen, setHelpOpen] = React.useState(false)
+  const [range, setRange] = React.useState('today')
+  const p = data && data.platform
+  const l = (data && data.local) || { requests: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, estimatedCostUsd: 0, hours: [] }
+  const b = data && data.balance
+  const pr = (p && p.ranges && p.ranges[range]) || (p && p.totals)
+
+  const save = () => {
+    writeSaved({ token: draft.token, apiKey: draft.apiKey })
+    host.call('setConfig', { token: draft.token, apiKey: draft.apiKey }).then(() => {
+      setSaved(true)
+      setSaveMsg('')
+      refresh()
+      setTimeout(() => setSaved(false), 2000)
+    }).catch((e) => {
+      setSaveMsg('保存失败（与 Host 通信出错）：' + String(e && e.message || e))
+    })
+  }
+  const forceRefresh = () => { host.call('refresh').then(() => refresh()).catch(() => refresh()) }
+  const resetLocal = () => { host.call('resetLocal').then(() => refresh()).catch(() => {}) }
+
+  const rows = []
+
+  // ---- header: title + settings gear (设置与用量信息分开) ----
+  rows.push(React.createElement('div', { key: 'head', className: 'dshup-head' },
+    React.createElement('span', { className: 'dshup-head-title' }, 'DeepSeek API 用量'),
+    React.createElement('span', { className: 'dshup-head-spacer' }),
+    React.createElement('button', {
+      className: 'dshup-gear',
+      title: view === 'settings' ? '返回用量' : '设置',
+      onClick: () => setView(view === 'settings' ? 'info' : 'settings'),
+    }, React.createElement(IconGear, null))))
+
+  if (view === 'settings') {
+    // ---- settings: display position + config ----
+    rows.push(React.createElement(Sec, { key: 'sec-pos', title: '显示位置', icon: React.createElement(IconClock, null) }))
+    rows.push(React.createElement('div', { key: 'pos', className: 'dshup-form' },
+      React.createElement('select', { value: position, onChange: (e) => setPosition(e.target.value) },
+        React.createElement('option', { value: 'float' }, '悬浮窗（可拖动）'),
+        React.createElement('option', { value: 'dock' }, '输入框下方（对话栏）'))))
+    rows.push(React.createElement('div', { key: 'sec-c', className: 'dshup-sec' },
+      React.createElement('span', { className: 'dshup-sec-ic' }, React.createElement(IconCard, null)),
+      React.createElement('span', null, '配置'),
+      React.createElement('span', { className: 'dshup-head-spacer' }),
+      React.createElement('span', { className: 'dshup-helpzone',
+        onMouseEnter: () => setHelpOpen(true),
+        onMouseLeave: () => setHelpOpen(false),
+      },
+        React.createElement('button', { className: 'dshup-help', title: '如何获取 userToken（点击固定/取消教程）',
+          onClick: () => setHelpOpen(!helpOpen),
+        }, '?'),
+        helpOpen ? React.createElement('div', { className: 'dshup-tutorial' },
+          React.createElement('div', { className: 'dshup-tutorial-title' }, '获取 userToken 简易教程'),
+          React.createElement('div', { className: 'dshup-step' }, React.createElement('b', null, '1'), '打开 platform.deepseek.com 并登录你的账号'),
+          React.createElement('div', { className: 'dshup-step' }, React.createElement('b', null, '2'), '按 F12（或右键→检查）打开开发者工具'),
+          React.createElement('div', { className: 'dshup-step' }, React.createElement('b', null, '3'), '切到 Application → Local Storage → platform.deepseek.com'),
+          React.createElement('div', { className: 'dshup-step' }, React.createElement('b', null, '4'), '复制 userToken 字段的值'),
+          React.createElement('div', { className: 'dshup-step' }, React.createElement('b', null, '5'), '粘贴到上方输入框 → 点「保存并刷新」'),
+          React.createElement('div', { className: 'dshup-step' }, React.createElement('b', null, '6'), '（可选）API Key 仅用于余额，留空则尝试 DSH 凭据'),
+        ) : null)))
+    rows.push(React.createElement('div', { key: 'host-state', className: 'dshup-hint' },
+      'Host 状态：' + (config.hasToken
+        ? '已收到平台 Token（长度 ' + (config.tokenLength || 0) + '）'
+        : '尚未收到平台 Token')
+      + (config.hasApiKey ? '；已收到 API Key' : '') + '。'))
+    rows.push(React.createElement('div', { key: 'cfg', className: 'dshup-form' },
+      React.createElement('label', null,
+        React.createElement('span', null, 'platform.deepseek.com 的 userToken' + (config.hasToken ? '（已配置）' : '（未配置）')),
+        React.createElement('input', {
+          type: 'password', placeholder: '登录 platform.deepseek.com 后：F12 → Application → Local Storage → userToken',
+          value: draft.token, onChange: (e) => setDraft({ token: e.target.value }),
+        })),
+      React.createElement('label', null,
+        React.createElement('span', null, 'DeepSeek API Key（可选，仅用于余额；留空则用 DSH 凭据）'),
+        React.createElement('input', {
+          type: 'password', placeholder: 'sk-…', value: draft.apiKey, onChange: (e) => setDraft({ apiKey: e.target.value }),
+        })),
+      React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+        React.createElement('button', { className: 'dshup-btn', onClick: save }, saved ? '已保存 ✓' : '保存并刷新'),
+        React.createElement('button', { className: 'dshup-btn', onClick: forceRefresh }, '立即刷新'),
+        React.createElement('span', { className: 'dshup-hint' }, 'Token 仅保存在本机浏览器与 DSH 内存中，不会写入对话。')),
+      saveMsg ? React.createElement('div', { className: 'dshup-err' }, saveMsg) : null))
+    rows.push(React.createElement('div', { key: 'done', className: 'dshup-form dshup-form-row' },
+      React.createElement('button', { className: 'dshup-btn dshup-btn-primary', onClick: () => setView('info') }, '完成')))
+  } else {
+    // ---- range selector ----
+  rows.push(React.createElement('div', { key: 'ranges', className: 'dshup-ranges' },
+    RANGES.map((r) => React.createElement('button', {
+      key: r.k,
+      className: 'dshup-range' + (range === r.k ? ' dshup-range-on' : ''),
+      onClick: () => setRange(r.k),
+    }, r.label))))
+
+  const dayRange = range === 'today' || range === 'yesterday'
+
+  if (p && pr) {
+    // ---- hero: range cost ----
+    rows.push(React.createElement('div', { key: 'hero', className: 'dshup-hero' },
+      React.createElement('div', null,
+        React.createElement('div', { className: 'dshup-hero-label' }, RANGES.find((r) => r.k === range).label + '消费（' + p.currency + '）'),
+        React.createElement('div', { className: 'dshup-hero-num' }, fmtMoney(pr.cost, p.currency)),
+        React.createElement('span', { className: 'dshup-hint' },
+          (range === 'month' ? p.month : (p.month + ' · ' + (range === 'week' ? '周一起' : ''))) + ' · 更新于 ' + fmtTime(data.lastUpdated))),
+      React.createElement('div', { className: 'dshup-chips' },
+        React.createElement(StatChip, { icon: React.createElement(IconReq, null), color: C_MISS, value: fmtInt(pr.requests), label: '请求次数' }),
+        React.createElement(StatChip, { icon: React.createElement(IconTrend, null), color: C_HIT, value: pr.cacheHitRate + '%', label: '缓存命中率' }),
+        React.createElement(StatChip, { icon: React.createElement(IconOut, null), color: C_OUT, value: fmtTokens(pr.output), label: '输出 Tokens' }))))
+
+    // ---- token-mix meters for the range ----
+    const totalTokens = pr.input + pr.output
+    if (totalTokens > 0) {
+      rows.push(React.createElement(Sec, { key: 'sec-mix', title: '用量构成', icon: React.createElement(IconBolt, null) }))
+      rows.push(React.createElement('div', { key: 'meters', className: 'dshup-meters' },
+        React.createElement(Meter, { label: '输入 · 缓存命中', value: pr.cacheHit, total: totalTokens, fmt: fmtTokens, color: C_HIT }),
+        React.createElement(Meter, { label: '输入 · 缓存未命中', value: pr.cacheMiss, total: totalTokens, fmt: fmtTokens, color: C_MISS }),
+        React.createElement(Meter, { label: '输出', value: pr.output, total: totalTokens, fmt: fmtTokens, color: C_OUT })))
+    }
+
+    // ---- token chart: hour for day ranges, day for week/month ----
+    let buckets = null
+    let unit = '按小时'
+    let sourceNote = null
+    if (dayRange) {
+      const todayKey = localDateKeyOf(new Date())
+      const yKey = localDateKeyOf(new Date(Date.now() - 86400000))
+      const dateKey = range === 'today' ? todayKey : yKey
+      buckets = localHourSeries(l, dateKey)
+      unit = '按小时'
+      sourceNote = '小时粒度来自 DSH 本机会话；平台仅提供日粒度'
+    } else {
+      buckets = platformDaySeries(p, range)
+      unit = '按天'
+    }
+    if (buckets && buckets.length > 0) {
+      rows.push(React.createElement(TokenChart, { key: 'chart', buckets: buckets, unit: unit, sourceNote: sourceNote }))
+    }
+
+    // ---- per-model for the range ----
+    rows.push(React.createElement(Sec, { key: 'sec-m', title: '按模型', icon: React.createElement(IconCard, null) }))
+    rows.push(React.createElement(ModelRows, { key: 'models', byModel: pr.byModel, currency: p.currency }))
+  } else {
+    // ---- upgrade / connect CTA ----
+    const err = data && data.error
+    rows.push(React.createElement('div', { key: 'cta', className: 'dshup-cta' },
+      React.createElement('span', { className: 'dshup-cta-ic' }, React.createElement(IconBolt, { size: 18 })),
+      React.createElement('div', { className: 'dshup-cta-body' },
+        React.createElement('b', null, '尚未配置平台 Token'),
+        React.createElement('span', null,
+          err && err.indexOf('未配置平台 Token') !== 0
+            ? err
+            : '配置后即可查看平台用量、消费金额与余额；配置框内的 ? 有获取教程。')),
+      React.createElement('button', { className: 'dshup-btn dshup-btn-primary', onClick: () => setView('settings') }, '去配置')))
+
+    // Even without a token, show the session's own hourly token chart for day ranges.
+    if (dayRange) {
+      const todayKey = localDateKeyOf(new Date())
+      const yKey = localDateKeyOf(new Date(Date.now() - 86400000))
+      const dateKey = range === 'today' ? todayKey : yKey
+      const buckets = localHourSeries(l, dateKey)
+      if (buckets && buckets.length > 0 && buckets.some((x) => x.cacheHit + x.cacheMiss + x.output > 0)) {
+        rows.push(React.createElement(TokenChart, { key: 'chart-local', buckets: buckets, unit: '按小时', sourceNote: 'DSH 本机会话 Token 消耗（未连接平台）' }))
+      }
+    }
+  }
+
+  // ---- balance ----
+  if (b && b.infos.length > 0) {
+    rows.push(React.createElement(Sec, { key: 'sec-b', title: '账户余额', icon: React.createElement(IconWallet, null),
+      badge: b.source === 'credentials' ? 'DSH 凭据' : b.source === 'user' ? '手动配置' : '平台 Token' }))
+    rows.push(React.createElement('div', { key: 'g-b', className: 'dshup-chips' },
+      b.infos.map((i) => React.createElement(StatChip, { key: i.currency,
+        icon: React.createElement(IconCard, null), color: C_HIT,
+        value: fmtMoney(i.total, i.currency), label: i.currency + ' 余额' }))))
+    rows.push(React.createElement('div', { key: 'b-detail', className: 'dshup-hint' },
+      b.infos.map((i) => '赠送 ' + fmtMoney(i.granted, i.currency) + ' · 充值 ' + fmtMoney(i.toppedUp, i.currency)).join('   |   ')))
+  }
+
+  // ---- DSH live (this session) ----
+  rows.push(React.createElement(Sec, { key: 'sec-l', title: 'DSH 实时（本会话）', icon: React.createElement(IconTrend, null) }))
+  rows.push(React.createElement('div', { key: 'g-l', className: 'dshup-chips' },
+    React.createElement(StatChip, { icon: React.createElement(IconReq, null), color: C_MISS, value: fmtInt(l.requests), label: '请求' }),
+    React.createElement(StatChip, { icon: React.createElement(IconIn, null), color: C_MISS, value: fmtTokens(l.inputTokens), label: '输入·未命中' }),
+    React.createElement(StatChip, { icon: React.createElement(IconCache, null), color: C_HIT, value: fmtTokens(l.cacheReadTokens), label: '输入·命中' }),
+    React.createElement(StatChip, { icon: React.createElement(IconOut, null), color: C_OUT, value: fmtTokens(l.outputTokens), label: '输出' }),
+    React.createElement(StatChip, { icon: React.createElement(IconCost, null), color: C_WARN, value: '$' + (l.estimatedCostUsd || 0).toFixed(4), label: '估算 USD' })))
+  rows.push(React.createElement('div', { key: 'reset', className: 'dshup-form dshup-form-row' },
+    React.createElement('button', { className: 'dshup-btn', onClick: resetLocal }, '清零本会话计数')))
+
+    // ---- meta ----
+    rows.push(React.createElement('div', { key: 'meta', className: 'dshup-meta' },
+      React.createElement(IconClock, null),
+      React.createElement('span', null, '更新于 ' + fmtTime(data.lastUpdated)),
+      data && data.error ? React.createElement('span', { className: 'dshup-err' }, data.error) : null))
+  }
+
+  return React.createElement('div', { className: 'dshup-panel' }, rows)
+}
+
+// ---- store binding ----
 function useStore() {
   const [, force] = React.useState(0)
   React.useEffect(() => subscribe(() => force(n => n + 1)), [])
@@ -248,8 +698,6 @@ function CompactBody(props) {
     )
   }
   if (status === 'ok') {
-    // Show the REAL reason the platform section is empty (missing token vs a
-    // failed/unauthorized fetch) instead of always claiming "not configured".
     const err = data && data.error
     if (err && err.indexOf('未配置平台 Token') !== 0) {
       return React.createElement('span', { className: 'dshup-err', title: err },
@@ -258,137 +706,6 @@ function CompactBody(props) {
     return React.createElement('span', { className: 'dshup-hint' }, '未配置平台 Token，点击展开配置')
   }
   return React.createElement('span', { className: 'dshup-hint' }, '加载中…')
-}
-
-function Detail(props) {
-  const { data } = props
-  const s = useStore()
-  const config = s.config
-  const position = s.position
-  const draft = s.draft
-  const [saved, setSaved] = React.useState(false)
-  const [saveMsg, setSaveMsg] = React.useState('')
-  const p = data && data.platform
-  const l = data && data.local
-  const b = data && data.balance
-
-  const save = () => {
-    writeSaved({ token: draft.token, apiKey: draft.apiKey })
-    host.call('setConfig', { token: draft.token, apiKey: draft.apiKey }).then(() => {
-      setSaved(true)
-      setSaveMsg('')
-      refresh()
-      setTimeout(() => setSaved(false), 2000)
-    }).catch((e) => {
-      setSaveMsg('保存失败（与 Host 通信出错）：' + String(e && e.message || e))
-    })
-  }
-  const forceRefresh = () => { host.call('refresh').then(() => refresh()).catch(() => refresh()) }
-  const resetLocal = () => { host.call('resetLocal').then(() => refresh()).catch(() => {}) }
-
-  const rows = []
-  if (p) {
-    rows.push(React.createElement('div', { key: 'sec-p', className: 'dshup-sec' },
-      '平台（' + p.month + '，' + p.currency + '）'))
-    rows.push(React.createElement('div', { key: 'g-p', className: 'dshup-grid' },
-      React.createElement('div', null, React.createElement('span', null, '请求次数'), React.createElement('b', null, fmtInt(p.totals.requests))),
-      React.createElement('div', null, React.createElement('span', null, '输入·缓存命中'), React.createElement('b', null, fmtTokens(p.totals.cacheHit))),
-      React.createElement('div', null, React.createElement('span', null, '输入·缓存未命中'), React.createElement('b', null, fmtTokens(p.totals.cacheMiss))),
-      React.createElement('div', null, React.createElement('span', null, '输出'), React.createElement('b', null, fmtTokens(p.totals.output))),
-      React.createElement('div', null, React.createElement('span', null, '缓存命中率'), React.createElement('b', null, p.totals.cacheHitRate + '%')),
-      React.createElement('div', null, React.createElement('span', null, '消费金额'), React.createElement('b', { className: 'dshup-accent' }, fmtMoney(p.totals.cost, p.currency))),
-    ))
-    rows.push(React.createElement('div', { key: 'sec-t', className: 'dshup-sec' }, '今日'))
-    rows.push(React.createElement('div', { key: 'g-t', className: 'dshup-grid' },
-      React.createElement('div', null, React.createElement('span', null, '请求次数'), React.createElement('b', null, fmtInt(p.today.requests))),
-      React.createElement('div', null, React.createElement('span', null, '输入·缓存命中'), React.createElement('b', null, fmtTokens(p.today.cacheHit))),
-      React.createElement('div', null, React.createElement('span', null, '输入·缓存未命中'), React.createElement('b', null, fmtTokens(p.today.cacheMiss))),
-      React.createElement('div', null, React.createElement('span', null, '输出'), React.createElement('b', null, fmtTokens(p.today.output))),
-      React.createElement('div', null, React.createElement('span', null, '消费金额'), React.createElement('b', { className: 'dshup-accent' }, fmtMoney(p.today.cost, p.currency))),
-    ))
-    if (p.totals.byModel && p.totals.byModel.length > 0) {
-      rows.push(React.createElement('div', { key: 'sec-m', className: 'dshup-sec' }, '按模型'))
-      rows.push(React.createElement('table', { key: 'tbl', className: 'dshup-table' },
-        React.createElement('thead', null, React.createElement('tr', null,
-          React.createElement('th', null, '模型'),
-          React.createElement('th', null, '请求'),
-          React.createElement('th', null, '缓存命中'),
-          React.createElement('th', null, '缓存未命中'),
-          React.createElement('th', null, '输出'),
-          React.createElement('th', null, '金额'))),
-        React.createElement('tbody', null, p.totals.byModel.map((m) =>
-          React.createElement('tr', { key: m.model },
-            React.createElement('td', null, m.model),
-            React.createElement('td', null, fmtInt(m.requests)),
-            React.createElement('td', null, fmtTokens(m.cacheHit)),
-            React.createElement('td', null, fmtTokens(m.cacheMiss)),
-            React.createElement('td', null, fmtTokens(m.output)),
-            React.createElement('td', null, fmtMoney(m.cost, p.currency)))))))
-    }
-  } else {
-    rows.push(React.createElement('div', { key: 'sec-no', className: 'dshup-sec' }, '平台数据'))
-    rows.push(React.createElement('div', { key: 'no', className: 'dshup-hint' },
-      data && data.error ? data.error : '配置平台 Token 后显示 DeepSeek 开放平台的请求次数 / Token 消耗 / 消费金额。'))
-  }
-
-  if (b && b.infos.length > 0) {
-    rows.push(React.createElement('div', { key: 'sec-b', className: 'dshup-sec' },
-      '账户余额' + (b.source === 'credentials' ? '（DSH 凭据）' : b.source === 'user' ? '（手动配置）' : '（平台 Token）')))
-    rows.push(React.createElement('div', { key: 'g-b', className: 'dshup-grid' },
-      b.infos.map((i) =>
-        React.createElement('div', { key: i.currency },
-          React.createElement('span', null, i.currency + ' 总额'),
-          React.createElement('b', { className: 'dshup-accent' }, fmtMoney(i.total, i.currency))))))
-  }
-
-  rows.push(React.createElement('div', { key: 'sec-l', className: 'dshup-sec' }, 'DSH 实时（本会话，从面板启用起）'))
-  rows.push(React.createElement('div', { key: 'g-l', className: 'dshup-grid' },
-    React.createElement('div', null, React.createElement('span', null, '请求次数'), React.createElement('b', null, fmtInt(l.requests))),
-    React.createElement('div', null, React.createElement('span', null, '输入（未命中缓存）'), React.createElement('b', null, fmtTokens(l.inputTokens))),
-    React.createElement('div', null, React.createElement('span', null, '输入（命中缓存）'), React.createElement('b', null, fmtTokens(l.cacheReadTokens))),
-    React.createElement('div', null, React.createElement('span', null, '输出'), React.createElement('b', null, fmtTokens(l.outputTokens))),
-    React.createElement('div', null, React.createElement('span', null, '费用（估算 USD）'), React.createElement('b', { className: 'dshup-accent' }, '$' + (l.estimatedCostUsd || 0).toFixed(4))),
-  ))
-  rows.push(React.createElement('div', { key: 'reset', className: 'dshup-form' },
-    React.createElement('button', { key: 'rb', className: 'dshup-btn', onClick: resetLocal }, '清零本会话计数')))
-
-  rows.push(React.createElement('div', { key: 'sec-pos', className: 'dshup-sec' }, '显示位置'))
-  rows.push(React.createElement('div', { key: 'pos', className: 'dshup-form' },
-    React.createElement('select', { value: position, onChange: (e) => setPosition(e.target.value) },
-      React.createElement('option', { value: 'float' }, '悬浮窗（可拖动）'),
-      React.createElement('option', { value: 'dock' }, '输入框下方（对话栏）'))))
-
-  rows.push(React.createElement('div', { key: 'sec-c', className: 'dshup-sec' }, '配置'))
-  rows.push(React.createElement('div', { key: 'host-state', className: 'dshup-hint' },
-    'Host 状态：' + (config.hasToken
-      ? '已收到平台 Token（长度 ' + (config.tokenLength || 0) + '）'
-      : '尚未收到平台 Token')
-    + (config.hasApiKey ? '；已收到 API Key' : '') + '。'))
-  rows.push(React.createElement('div', { key: 'cfg', className: 'dshup-form' },
-    React.createElement('label', null,
-      React.createElement('span', null, 'platform.deepseek.com 的 userToken' + (config.hasToken ? '（已配置）' : '（未配置）')),
-      React.createElement('input', {
-        type: 'password', placeholder: '登录 platform.deepseek.com 后：F12 → Application → Local Storage → userToken',
-        value: draft.token, onChange: (e) => setDraft({ token: e.target.value }),
-      })),
-    React.createElement('label', null,
-      React.createElement('span', null, 'DeepSeek API Key（可选，仅用于余额；留空则用 DSH 凭据）'),
-      React.createElement('input', {
-        type: 'password', placeholder: 'sk-…', value: draft.apiKey, onChange: (e) => setDraft({ apiKey: e.target.value }),
-      })),
-    React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-      React.createElement('button', { className: 'dshup-btn', onClick: save }, saved ? '已保存 ✓' : '保存并刷新'),
-      React.createElement('button', { className: 'dshup-btn', onClick: forceRefresh }, '立即刷新'),
-      React.createElement('span', { className: 'dshup-hint' },
-        'Token 仅保存在本机浏览器与 DSH 内存中，不会写入对话。'),
-    ),
-    saveMsg ? React.createElement('div', { className: 'dshup-err' }, saveMsg) : null,
-  ))
-
-  rows.push(React.createElement('div', { key: 'meta', className: 'dshup-hint' },
-    '更新于 ' + fmtTime(data.lastUpdated) + (data.error ? ' · 上次错误：' + data.error : '')))
-
-  return React.createElement('div', { className: 'dshup-panel' }, rows)
 }
 
 // Dock variant: a readout line under the composer.
@@ -409,21 +726,34 @@ function UsageDock() {
 }
 
 // Floating variant: a draggable whale badge. Hovering (350ms) expands the card;
-// PRESSING the badge cancels any pending expand — press-and-hold is a drag, so
-// a drag never triggers the card. Clicking (without moving) toggles; the drag
-// position persists on mouseup.
+// PRESSING the badge cancels any pending expand; clicking (without moving)
+// toggles; drag position persists on mouseup.
 function UsageFloat() {
   const s = useStore()
   const [expanded, setExpanded] = React.useState(false)
   const dragRef = React.useRef({ sx: 0, sy: 0, ox: 0, oy: 0, moved: false })
+  const draggingRef = React.useRef(false)
+  const hoverRef = React.useRef(false)
   const hoverTimer = React.useRef(null)
+  const closeTimer = React.useRef(null)
   if (s.position !== 'float') return null
 
   const pos = s.floatPos || defaultFloatPos()
-  const openUp = pos.y > (window.innerHeight || 800) / 2
+  const vwF = () => window.innerWidth || 1280
+  const vhF = () => window.innerHeight || 800
+  const openUp = pos.y > vhF() / 2
+  const openLeft = pos.x > vwF() / 2
+  const gap = 8
+  const pillW = 48
+  const pillH = 48
+  // clamp the card to the free space so it never gets clipped by the viewport
+  const availUp = pos.y - gap - 12
+  const availDown = vhF() - pos.y - pillH - gap - 12
+  const cardMaxH = Math.max(140, Math.min(680, openUp ? availUp : availDown))
+  const cardMaxW = Math.max(200, Math.min(480, (openLeft ? pos.x + pillW : vwF() - pos.x) - gap - 12))
 
   const scheduleExpand = () => {
-    if (hoverTimer.current !== null || s.dragging) return
+    if (hoverTimer.current !== null || draggingRef.current) return
     hoverTimer.current = window.setTimeout(() => {
       hoverTimer.current = null
       setExpanded(true)
@@ -435,12 +765,37 @@ function UsageFloat() {
       hoverTimer.current = null
     }
   }
+  // Shared hover: pill AND card both keep the panel open. Closing is delayed
+  // 250ms so moving across the gap between them never collapses the card.
+  const armClose = () => {
+    if (closeTimer.current !== null) return
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null
+      if (!hoverRef.current && !draggingRef.current) setExpanded(false)
+    }, 250)
+  }
+  const cancelClose = () => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current)
+      closeTimer.current = null
+    }
+  }
+  const onEnter = () => {
+    hoverRef.current = true
+    cancelClose()
+    scheduleExpand()
+  }
+  const onLeave = () => {
+    hoverRef.current = false
+    cancelExpand()
+    armClose()
+  }
 
   const onPillMouseDown = (e) => {
     if (e.button !== 0) return
     e.preventDefault()
     e.stopPropagation()
-    cancelExpand() // pressing the badge means "maybe drag" — never expand now
+    cancelExpand()
     const base = s.floatPos || defaultFloatPos()
     const d = dragRef.current
     d.sx = e.clientX
@@ -448,6 +803,7 @@ function UsageFloat() {
     d.ox = base.x
     d.oy = base.y
     d.moved = false
+    draggingRef.current = true
     setState({ dragging: true })
     const vw = () => window.innerWidth || 2000
     const vh = () => window.innerHeight || 1500
@@ -465,6 +821,7 @@ function UsageFloat() {
     const onUp = () => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
+      draggingRef.current = false
       setState({ dragging: false })
       if (dragRef.current.moved && state.floatPos) {
         writeSaved({ floatX: state.floatPos.x, floatY: state.floatPos.y })
@@ -476,11 +833,11 @@ function UsageFloat() {
 
   const children = []
   if (expanded) {
-    children.push(React.createElement('div', { key: 'card', className: 'dshup-card' },
+    children.push(React.createElement('div', { key: 'card', className: 'dshup-card', style: { width: cardMaxW + 'px', maxHeight: cardMaxH + 'px' },
+      onMouseEnter: onEnter, onMouseLeave: onLeave,
+    },
       React.createElement(Detail, { data: s.data })))
   }
-  // A lone whale badge: no pill, no text — just the icon (plus a tiny status
-  // dot at its corner). Hover (delayed) expands the card; press-and-hold drags.
   children.push(React.createElement('div', {
     key: 'btn',
     className: 'dshup-whale-btn',
@@ -496,10 +853,10 @@ function UsageFloat() {
   ))
 
   return React.createElement('div', {
-    className: 'dshup-float' + (s.dragging ? ' dshup-dragging' : '') + (!openUp ? ' dshup-open-up' : ''),
+    className: 'dshup-float' + (s.dragging ? ' dshup-dragging' : '') + (openUp ? ' dshup-oc-up' : ' dshup-oc-down') + (openLeft ? ' dshup-oc-left' : ' dshup-oc-right'),
     style: { left: pos.x + 'px', top: pos.y + 'px' },
-    onMouseEnter: scheduleExpand,
-    onMouseLeave: () => { cancelExpand(); setExpanded(false) },
+    onMouseEnter: onEnter,
+    onMouseLeave: onLeave,
   }, children)
 }
 
@@ -507,15 +864,11 @@ function UsageFloat() {
 return {
   inject: ['slots', 'timer'],
   apply(ctx) {
-    // styles.insert returns a disposer; unload cleans everything anyway.
     styles.insert(CSS)
 
-    // Restore saved config: position locally, secrets pushed to the host, and
-    // input drafts prefilled so collapse/expand never loses what was typed.
     const saved = readSaved()
     let position = saved.position
     if (position !== 'float' && position !== 'dock') {
-      // Legacy corner presets migrate to the draggable float mode.
       position = 'float'
       writeSaved({ position })
     }
@@ -533,13 +886,11 @@ return {
     ctx.interval(refresh, 2000)
     ctx.interval(refreshConfig, 30 * 1000)
 
-    // Dock readout (visible inside a conversation).
     ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
       { name: 'conversation.composer.dock', id: 'usage', order: 50, label: 'API 用量' },
       UsageDock,
     ))
 
-    // Floating whale badge (frame-wide, session-independent, draggable).
     ctx.slots.inject('shell.overlay', () => ctx.slots.register(
       { name: 'shell.overlay', id: 'usage-float', order: 50, label: 'API 用量浮窗' },
       UsageFloat,

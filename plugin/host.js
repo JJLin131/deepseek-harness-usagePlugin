@@ -1,5 +1,5 @@
 /**
- * DeepSeek Usage Panel — HOST half (server side).
+ * DeepSeek Usage Panel — HOST half (server side). v6
  *
  * Runs inside the DSH dynamic-plugin sandbox as the body of an async function.
  * IMPORTANT: in the real sandbox only `console` / `harness` / `btoa` / `atob` /
@@ -12,34 +12,32 @@
  * What it does:
  *  1. Pulls DeepSeek Open-Platform usage for the current month from the (private)
  *     dashboard endpoints /api/v0/usage/amount and /api/v0/usage/cost using the
- *     platform `userToken` (browser session token) the user configures from the UI.
- *     These return the exact breakdown the panel shows: request_count,
- *     input cache-hit tokens, input cache-miss tokens, output tokens, and billed cost.
+ *     platform `userToken` (browser session token). Returns per-day series (days)
+ *     and pre-computed range aggregates (today / yesterday / this week / this
+ *     month) with per-model breakdown, for the time-range selector UI.
  *  2. Pulls the account balance from https://api.deepseek.com/user/balance using the
  *     DSH-resolved DEEPSEEK_API_KEY (or the token as a fallback).
- *  3. Always aggregates DSH's OWN live consumption from `session/event`
- *     (`assistant/message` carries TokenUsage) — requests, input, cache-read, output —
- *     with an estimated USD cost at DeepSeek list prices.
+ *  3. Aggregates DSH's OWN live consumption from `session/event`
+ *     (`assistant/message` carries TokenUsage at `event.data.usage`) — requests,
+ *     input, cache-read, output — with an estimated USD cost at DeepSeek list
+ *     prices, plus per-hour buckets (last 48h) for the hourly chart.
  *
  * RPC surface (browser half calls these through host.call):
  *   snapshot    -> current aggregated view (JSON-safe)
  *   getConfig   -> { hasToken, hasApiKey, apiKeySource, tokenLength, apiKeyLength }
- *                  (never echoes the secrets themselves)
  *   setConfig   -> { token?, apiKey? } ('' clears); stores in memory, refreshes
  *   resetLocal  -> zero the DSH-session aggregation counters
  *   refresh     -> force an immediate platform refresh
  */
 
 // ---- Configuration ----
-const POLL_PLATFORM_MS = 60 * 1000 // how often the host re-fetches platform data
+const POLL_PLATFORM_MS = 60 * 1000
 const FETCH_TIMEOUT_MS = 30 * 1000
 const FETCH_MAX_STDOUT_BYTES = 8 * 1024 * 1024
 
 const DEEPSEEK_PLATFORM_BASE = 'https://platform.deepseek.com'
 const DEEPSEEK_API_BASE = 'https://api.deepseek.com'
 
-// USD list prices per 1M tokens (used only for the LOCAL estimate; the platform
-// endpoint reports the real billed cost and currency). Edit freely.
 const PRICES_USD_PER_M = {
   'deepseek-chat': { cacheHit: 0.07, cacheMiss: 0.27, output: 1.10 },
   'deepseek-reasoner': { cacheHit: 0.14, cacheMiss: 0.55, output: 2.19 },
@@ -52,13 +50,12 @@ let refreshing = false
 let refreshQueued = false
 
 const localAgg = { requests: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, since: Date.now() }
+// 'YYYY-MM-DD|HH' -> { requests, input, cacheHit, output } (DSH session hourly buckets)
+const localHours = new Map()
 
-// Caches filled by refresh(); assembled into `snapshot` by publish().
 let platformCache = null
 let balanceCache = null
 let errorCache = null
-
-// The JSON-safe view the browser polls.
 let snapshot = null
 
 // ---- Small helpers (pure, no ctx — safe at module scope) ----
@@ -67,14 +64,40 @@ function errText(e) {
   const m = e && e.message ? e.message : String(e)
   return String(m).slice(0, 500)
 }
+function localDateKey(d) {
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+}
+function hourKeyOf(d) {
+  return localDateKey(d) + '|' + pad2(d.getHours())
+}
+function hourKeyAt(ms) {
+  return hourKeyOf(new Date(ms))
+}
 
 function emptyAgg() {
   return { requests: 0, cacheHit: 0, cacheMiss: 0, output: 0, cost: 0, models: {} }
 }
+function mergeAgg(into, from) {
+  if (!from) return
+  into.requests += from.requests
+  into.cacheHit += from.cacheHit
+  into.cacheMiss += from.cacheMiss
+  into.output += from.output
+  into.cost += from.cost
+  for (const model of Object.keys(from.models)) {
+    const fm = from.models[model]
+    if (!into.models[model]) into.models[model] = { requests: 0, cacheHit: 0, cacheMiss: 0, output: 0, cost: 0 }
+    const im = into.models[model]
+    im.requests += fm.requests
+    im.cacheHit += fm.cacheHit
+    im.cacheMiss += fm.cacheMiss
+    im.output += fm.output
+    im.cost += fm.cost
+  }
+}
 
 // Fold one endpoint's `total`/`days[].data` rows into an aggregate. `isCost`
-// selects the cost endpoint (sums amounts as money) vs the amount endpoint
-// (token/request counts by type).
+// selects the cost endpoint (sums amounts as money) vs the amount endpoint.
 function addRows(agg, rows, isCost) {
   if (!Array.isArray(rows)) return
   for (const row of rows) {
@@ -112,6 +135,7 @@ function aggToJson(agg) {
       cost: agg.models[model].cost,
     }))
     .sort((a, b) => b.cost - a.cost || b.requests - a.requests)
+    .slice(0, 8)
   return {
     requests: agg.requests,
     cacheHit: agg.cacheHit,
@@ -124,10 +148,6 @@ function aggToJson(agg) {
   }
 }
 
-function localDateKey(d) {
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
-}
-
 function localEstimateUsd() {
   const p = DEFAULT_PRICE
   return (localAgg.cacheReadTokens / 1e6) * p.cacheHit
@@ -136,6 +156,22 @@ function localEstimateUsd() {
 }
 
 function localToJson() {
+  const nowMs = Date.now()
+  const floor = hourKeyAt(nowMs - 48 * 3600 * 1000)
+  const hours = Array.from(localHours.entries())
+    .filter((pair) => pair[0] >= floor)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map((pair) => {
+      const sep = pair[0].indexOf('|')
+      return {
+        date: pair[0].slice(0, sep),
+        h: pair[0].slice(sep + 1),
+        requests: pair[1].requests,
+        input: pair[1].input,
+        cacheHit: pair[1].cacheHit,
+        output: pair[1].output,
+      }
+    })
   return {
     requests: localAgg.requests,
     inputTokens: localAgg.inputTokens,
@@ -144,6 +180,7 @@ function localToJson() {
     outputTokens: localAgg.outputTokens,
     estimatedCostUsd: Math.round(localEstimateUsd() * 10000) / 10000,
     since: localAgg.since,
+    hours,
   }
 }
 
@@ -175,16 +212,7 @@ return {
   name: 'dsh-usage-panel-host',
   inject: ['shell', 'timer', 'credentials'],
   apply(ctx) {
-    // ------------------------------------------------------------------
-    // Everything below closes over the apply(ctx) parameter on purpose.
-    // ------------------------------------------------------------------
-
-    // HTTP through a node subprocess. ctx.shell on Windows runs
-    // `pwsh -Command <command>`; the command is one argv element, so the -e
-    // payload must not contain double quotes or `$`. The request rides in the
-    // DSHUP_REQ environment entry as JSON (no shell quoting involved). The
-    // helper sets process.exitCode instead of calling process.exit() — an
-    // immediate exit while undici still holds sockets crashes node on Windows.
+    // HTTP through a node subprocess (ctx.shell on Windows runs pwsh).
     const NODE_FETCH_E =
       'node -e "const r=JSON.parse(process.env.DSHUP_REQ);'
       + 'const h=Object.assign({accept:\'application/json\'},r.headers||{});'
@@ -209,10 +237,6 @@ return {
       return text
     }
 
-    // The private dashboard endpoints answer HTTP 200 with { code: 0 } on
-    // success; an invalid/expired token comes back as { code: 40003, ... } —
-    // treat any non-zero code as a failure instead of showing an all-zero
-    // dashboard.
     function assertPlatformOk(j, label) {
       if (j && typeof j === 'object' && typeof j.code === 'number' && j.code !== 0) {
         const msg = j.msg || j.message || ''
@@ -240,20 +264,65 @@ return {
       addRows(totals, amtData ? amtData.total : undefined, false)
       addRows(totals, cstBiz ? cstBiz.total : undefined, true)
 
-      const today = emptyAgg()
       const todayKey = localDateKey(now)
+
+      // Per-day aggregates (kept with per-model detail for range sums).
+      const dayMap = new Map()
+      function addDay(date, rows, isCost) {
+        if (!date || !Array.isArray(rows)) return
+        let a = dayMap.get(date)
+        if (!a) { a = emptyAgg(); dayMap.set(date, a) }
+        addRows(a, rows, isCost)
+      }
       if (amtData && Array.isArray(amtData.days)) {
-        for (const d of amtData.days) { if (d && d.date === todayKey) addRows(today, d.data, false) }
+        for (const d of amtData.days) { if (d && typeof d.date === 'string') addDay(d.date, d.data, false) }
       }
       if (cstBiz && Array.isArray(cstBiz.days)) {
-        for (const d of cstBiz.days) { if (d && d.date === todayKey) addRows(today, d.data, true) }
+        for (const d of cstBiz.days) { if (d && typeof d.date === 'string') addDay(d.date, d.data, true) }
+      }
+
+      const dayKeys = Array.from(dayMap.keys()).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+
+      // Daily series for the token-consumption chart (last 31 days).
+      const days = dayKeys.slice(-31).map((key) => {
+        const g = aggToJson(dayMap.get(key))
+        return {
+          date: key.slice(5), // MM-DD (chart x label)
+          full: key, // YYYY-MM-DD (used to scope the week/month chart)
+          requests: g.requests,
+          input: g.input,
+          cacheHit: g.cacheHit,
+          cacheMiss: g.cacheMiss,
+          output: g.output,
+          cost: Math.round(g.cost * 100) / 100,
+        }
+      })
+
+      // Range summaries: today / yesterday / this calendar week / this month.
+      const yesterdayKey = localDateKey(new Date(now.getTime() - 86400000))
+      const dow = (now.getDay() + 6) % 7 // Monday=0
+      const mondayKey = localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow))
+      function sumRange(keys) {
+        const a = emptyAgg()
+        for (const k of keys) { const d = dayMap.get(k); if (d) mergeAgg(a, d) }
+        return aggToJson(a)
+      }
+      const ranges = {
+        today: sumRange([todayKey]),
+        yesterday: sumRange([yesterdayKey]),
+        week: sumRange(dayKeys.filter((k) => k >= mondayKey && k <= todayKey)),
+        month: aggToJson(totals),
       }
 
       return {
         month: year + '-' + pad2(month),
+        monthPrefix: year + '-' + pad2(month), // current month 'YYYY-MM' for chart scoping
+        weekStart: mondayKey, // Monday of this week
+        weekEnd: todayKey,
         currency: (cstBiz && cstBiz.currency) || 'CNY',
         totals: aggToJson(totals),
-        today: aggToJson(today),
+        days,
+        ranges,
       }
     }
 
@@ -285,9 +354,6 @@ return {
       }
     }
 
-    // Platform refresh (network). A refresh already in flight would read the
-    // stale config; queue one more run so setConfig arriving mid-flight still
-    // picks up the new token/key.
     async function refresh() {
       if (refreshing) {
         refreshQueued = true
@@ -311,7 +377,6 @@ return {
           balanceCache = await fetchBalance()
         } catch (e) {
           balanceCache = null
-          // Balance is a bonus; do not let its failure replace the main error.
         }
       } catch (e) {
         errorCache = '刷新失败: ' + errText(e)
@@ -325,15 +390,28 @@ return {
       }
     }
 
-    // Live DSH consumption: assistant/message events carry per-request TokenUsage.
+    // Live DSH consumption. NOTE: the appended SessionEvent is
+    // { type, seq, time, data }, and TokenUsage lives at event.data.usage
+    // ({ inputTokens, outputTokens, cacheReadTokens, ... }).
     ctx.on('session/event', (session, event) => {
       try {
-        if (!event || event.type !== 'assistant/message' || !event.usage) return
-        const u = event.usage
+        if (!event || event.type !== 'assistant/message') return
+        const data = event.data || {}
+        const u = data.usage
         localAgg.requests += 1
-        localAgg.inputTokens += u.inputTokens || 0
-        localAgg.cacheReadTokens += u.cacheReadTokens || 0
-        localAgg.outputTokens += u.outputTokens || 0
+        const input = (u && u.inputTokens) || 0
+        const cacheHit = (u && u.cacheReadTokens) || 0
+        const output = (u && u.outputTokens) || 0
+        localAgg.inputTokens += input
+        localAgg.cacheReadTokens += cacheHit
+        localAgg.outputTokens += output
+        const hk = hourKeyOf(new Date())
+        let b = localHours.get(hk)
+        if (!b) { b = { requests: 0, input: 0, cacheHit: 0, output: 0 }; localHours.set(hk, b) }
+        b.requests += 1
+        b.input += input
+        b.cacheHit += cacheHit
+        b.output += output
         publish()
       } catch (e) {
         console.error('usage aggregation failed:', e)
@@ -359,6 +437,7 @@ return {
       localAgg.cacheReadTokens = 0
       localAgg.outputTokens = 0
       localAgg.since = Date.now()
+      localHours.clear()
       publish()
       return { ok: true }
     })
@@ -367,7 +446,6 @@ return {
       return { ok: true }
     })
 
-    // Initial state, then periodic platform refresh.
     publish()
     ctx.interval(refresh, POLL_PLATFORM_MS)
     refresh()

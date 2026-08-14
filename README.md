@@ -6,11 +6,15 @@
 - **Token 消耗拆分**：输入（命中缓存）、输入（未命中缓存）、输出
 - **消费金额**（平台实际计费，¥/CNY；DSH 本会话为 USD 估算）
 - **账户余额**（自动使用 DSH 的 `DEEPSEEK_API_KEY` 凭据）
-- **缓存命中率**、**按模型明细**、**今日/当月**统计
+- **缓存命中率**、**按模型明细**
+- **时间范围切换**：今日 / 昨日 / 本周 / 本月，每个范围都有完整指标与
+  **Token 消耗堆叠图**（日范围按小时、周/月按天，横轴与所选范围一致）
 - **DSH 实时用量**（本会话，无需任何配置，从启用面板起累计）
 
 显示为可自由拖动的 DeepSeek 小鲸鱼悬浮窗：**鼠标按住可拖到任意位置**（位置自动记忆），
-**悬停自动展开**完整信息；也可切换为**输入框下方**（对话栏）模式。
+卡片按视口自适应展开（下方→向上、右侧→向左等），**悬停自动展开**且移向卡片不闪关；
+也可切换为**输入框下方**（对话栏）模式。展开卡片只展示用量信息，
+「显示位置 / 配置」在右上角齿轮进入的独立设置视图，配置区带 `?` 获取 Token 教程。
 
 ---
 
@@ -47,17 +51,21 @@ test/
 - **Host 半**（服务端，`node:vm` 沙箱内）：
   - 用 `ctx.shell` 启动一个 `node` 子进程做 HTTP（沙箱无 `fetch`），请求体经环境变量传入，无引号转义问题；
   - 每 60 秒拉取当月 `usage/amount` + `usage/cost`（容错解析 `biz_data.total/days`），并聚合出
-    请求次数、缓存命中/未命中、输出、金额（¥）与缓存命中率；
+    请求次数、缓存命中/未命中、输出、金额（¥）与缓存命中率；同时按日序列与
+    今日/昨日/本周/本月四档范围（含按模型明细）预聚合，供时间范围选择器使用；
   - 经 `ctx.credentials` 解析 `DEEPSEEK_API_KEY` 查询余额；
-  - 监听 `session/event` 累计 DSH 本会话的 `TokenUsage`（输入/缓存读/输出），并按列表价估算 USD；
-  - 通过 `harness.handle` 暴露 `snapshot` / `getConfig` / `setConfig` / `resetLocal` 四个 RPC。
+  - 监听 `session/event`（TokenUsage 位于 `event.data.usage`）累计 DSH 本会话用量，
+    并按小时分桶（最近 48h）供日范围图表使用；
+  - 通过 `harness.handle` 暴露 `snapshot` / `getConfig` / `setConfig` / `resetLocal` / `refresh` 五个 RPC。
 - **Browser 半**（页面内闭包）：
   - 注册 `shell.overlay`（根级浮层，全局可见）与 `conversation.composer.dock`（对话栏）两个槽位，
     按位置设置只渲染其一；
   - 每 2 秒 `host.call('snapshot')` 轮询；`userToken`/API Key 存于本机 `localStorage` 并推给 host，
     host 从不把密钥回传页面（`getConfig` 只返回布尔事实）；
-  - 鲸鱼悬浮窗（无胶囊/文字，仅官方 DeepSeek 鲸鱼图标）容器 `onMouseEnter`/`onMouseLeave`
-    自动展开/收起完整卡片（移动到卡片不闪烁）；按住图标可拖动到任意位置并记忆。
+  - 鲸鱼悬浮窗（仅官方 DeepSeek 鲸鱼图标）悬停 350ms 展开卡片，徽标与卡片共享悬停、
+    离开后 250ms 才收起（移向卡片不闪关）；卡片按视口可用空间朝空白方向展开并钳制尺寸；
+  - 展开卡片仅展示用量信息；右上角齿轮进入独立设置视图（显示位置 / 配置），
+    配置区 `?` 提供获取 `userToken` 的六步教程；未配置 Token 时显示醒目 CTA 引导。
 
 ## 测试
 

@@ -88,13 +88,20 @@ const ReactStub = {
 
 const SNAPSHOT = {
   platform: {
-    month: '2026-08', currency: 'CNY',
+    month: '2026-08', monthPrefix: '2026-08', currency: 'CNY',
+    weekStart: '2026-07-27', weekEnd: '2026-08-02',
     totals: { requests: 1212, cacheHit: 100686720, cacheMiss: 1305432, output: 656338, input: 101992152, cost: 4.63, cacheHitRate: 98.7, byModel: [{ model: 'deepseek-v4-flash', requests: 1212, cacheHit: 100686720, cacheMiss: 1305432, output: 656338, cost: 4.63 }] },
-    today: { requests: 33, cacheHit: 500000, cacheMiss: 20000, output: 9000, input: 520000, cost: 0.0334, cacheHitRate: 96.2, byModel: [] },
+    days: [{ date: '07-27', full: '2026-07-27', requests: 5, input: 1000, cacheHit: 900, cacheMiss: 100, output: 200, cost: 0.1 }],
+    ranges: {
+      today: { requests: 33, cacheHit: 500000, cacheMiss: 20000, output: 9000, input: 520000, cost: 0.0334, cacheHitRate: 96.2, byModel: [] },
+      yesterday: { requests: 0, cacheHit: 0, cacheMiss: 0, output: 0, input: 0, cost: 0, cacheHitRate: 0, byModel: [] },
+      week: { requests: 5, cacheHit: 900, cacheMiss: 100, output: 200, input: 1000, cost: 0.1, cacheHitRate: 90, byModel: [] },
+      month: { requests: 1212, cacheHit: 100686720, cacheMiss: 1305432, output: 656338, input: 101992152, cost: 4.63, cacheHitRate: 98.7, byModel: [{ model: 'deepseek-v4-flash', requests: 1212, cacheHit: 100686720, cacheMiss: 1305432, output: 656338, cost: 4.63 }] },
+    },
   },
-  local: { requests: 1, inputTokens: 100, cacheReadTokens: 80, cacheMissTokens: 100, outputTokens: 20, estimatedCostUsd: 0.0001, since: 1 },
+  local: { requests: 1, inputTokens: 100, cacheReadTokens: 80, cacheMissTokens: 100, outputTokens: 20, estimatedCostUsd: 0.0001, since: 1, hours: [] },
   balance: { source: 'credentials', available: true, infos: [{ currency: 'CNY', total: 110, granted: 0, toppedUp: 110 }] },
-  config: { hasToken: true, hasApiKey: false, apiKeySource: 'credentials' },
+  config: { hasToken: true, hasApiKey: false, apiKeySource: 'credentials', tokenLength: 7, apiKeyLength: 0 },
   lastUpdated: Date.now(),
   error: null,
 }
@@ -172,17 +179,19 @@ async function main() {
   check('position migrated to float', JSON.parse(storage.get('dsh-usage.config') || '{}').position, 'float')
   check('default float position near right edge', f0.props.style.left, '1200px')
 
-  console.log('· delayed hover: expands only after the timer fires, collapses on leave')
+  console.log('· delayed hover: expands after timer; close has a 250ms grace (shared hover)')
   check('mouseenter schedules expand', typeof f0.props.onMouseEnter, 'function')
-  check('mouseleave collapses', typeof f0.props.onMouseLeave, 'function')
+  check('mouseleave schedules grace close', typeof f0.props.onMouseLeave, 'function')
   f0.props.onMouseEnter()
-  check('hover does NOT expand instantly', flatChildren(render(Float)).some(c => c.props && c.props.className === 'dshup-card'), false)
+  check('hover does NOT expand instantly', cardPresent(render(Float)), false)
   flushTimers()
   const f1 = render(Float)
-  check('card appears after hover delay', flatChildren(f1).some(c => c.props && c.props.className === 'dshup-card'), true)
+  check('card appears after hover delay', cardPresent(f1), true)
   f1.props.onMouseLeave()
-  const f2 = render(Float)
-  check('card hides on leave', flatChildren(f2).some(c => c.props && c.props.className === 'dshup-card'), false)
+  // the card must stay open while the pointer is between pill and card
+  check('card stays open during close grace', cardPresent(render(Float)), true)
+  flushTimers()
+  check('card hides after close grace', cardPresent(render(Float)), false)
 
   console.log('· press cancels pending hover (press = intent to drag)')
   const fHover = render(Float)
@@ -192,7 +201,7 @@ async function main() {
   btnHover.props.onMouseDown({ button: 0, clientX: 10, clientY: 10, preventDefault() {}, stopPropagation() {} })
   check('mousedown cancels pending hover timer', winTimers.size, 0)
   flushTimers()
-  check('no expand after cancelled hover + timer flush', flatChildren(render(Float)).some(c => c.props && c.props.className === 'dshup-card'), false)
+  check('no expand after cancelled hover + timer flush', cardPresent(render(Float)), false)
   winListeners.mouseup({}) // close the press without movement; nothing persists
 
   console.log('· drag: mousedown -> mousemove -> mouseup moves and persists the position')
@@ -208,12 +217,13 @@ async function main() {
   // x is clamped to viewport width - 40: 1200 + 60 = 1260 -> 1240.
   check('position updated while dragging', fMoved.props.style.left, '1240px')
   check('dragging class applied', fMoved.props.className.includes('dshup-dragging'), true)
-  check('bottom-half position opens card upward (no column-reverse)', fMoved.props.className.includes('dshup-open-up'), false)
+  // bottom half (y ≈ 690): the card opens upward
+  check('bottom-half position opens card upward', fMoved.props.className.includes('dshup-oc-up'), true)
   // Drag the widget to the top half of the viewport: the card must flip to
-  // open downward (column-reverse) so it never runs off-screen.
+  // open downward so it never runs off-screen.
   winListeners.mousemove({ clientX: 160, clientY: -500 })
   const fTop = render(Float)
-  check('top-half position flips card direction', fTop.props.className.includes('dshup-open-up'), true)
+  check('top-half position opens card downward', fTop.props.className.includes('dshup-oc-down'), true)
   winListeners.mouseup({})
   check('listeners cleaned up', winListeners.mousemove === undefined, true)
   const saved = JSON.parse(storage.get('dsh-usage.config') || '{}')
@@ -221,22 +231,27 @@ async function main() {
   check('position persisted on mouseup (y)', saved.floatY, 60)
   // A drag must not toggle the expanded card.
   const fAfterDrag = render(Float)
-  check('drag did not expand', flatChildren(fAfterDrag).some(c => c.props && c.props.className === 'dshup-card'), false)
+  check('drag did not expand', cardPresent(fAfterDrag), false)
   whaleBtn.props.onClick()
-  check('click after drag still suppressed (moved flag)', flatChildren(render(Float)).some(c => c.props && c.props.className === 'dshup-card'), false)
+  check('click after drag still suppressed (moved flag)', cardPresent(render(Float)), false)
 
-  console.log('· position switch to dock')
+  console.log('· settings view (gear): 显示位置 lives there, not in the info view')
   const f3 = render(Float)
   f3.props.onMouseEnter()
   flushTimers()
   const f4 = render(Float)
   // Detail is a function component the stub does not auto-render; render it once
-  // to reach the position <select>.
+  // to reach the info view (no position select), then open settings via gear.
   const detailEl = flatChildren(f4).find(c => c.type && c.type.name === 'Detail')
   check('detail element present when hovered', detailEl !== undefined, true)
-  const detail = renderWith(detailEl.type, { data: SNAPSHOT })
-  const select = findSelect(detail)
-  check('position select rendered', select !== null, true)
+  const info = renderWith(detailEl.type, { data: SNAPSHOT })
+  check('info view has no position select', findSelect(info) === null, true)
+  const gear = flatChildren(info).find(c => c.props && c.props.className === 'dshup-gear')
+  check('gear button present', gear !== undefined, true)
+  gear.props.onClick()
+  const settings = renderWith(detailEl.type, { data: SNAPSHOT })
+  const select = findSelect(settings)
+  check('position select rendered in settings view', select !== null, true)
   select.props.onChange({ target: { value: 'dock' } })
   check('dock renders after switch', render(Dock) !== null, true)
   check('float null after switch', render(Float) === null, true)
@@ -276,6 +291,10 @@ function flatChildren(node) {
   }
   walk(node.children)
   return out
+}
+
+function cardPresent(node) {
+  return flatChildren(node).some((c) => c.props && c.props.className === 'dshup-card')
 }
 
 function findSelect(node) {

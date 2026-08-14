@@ -171,8 +171,8 @@ async function main() {
   check('currency', snap.platform.currency, 'CNY')
   check('month label', snap.platform.month, new Date().getFullYear() + '-' + pad(new Date().getMonth() + 1))
   check('byModel row', t.byModel.length, 1)
-  check('today requests', snap.platform.today.requests, 33)
-  check('today cost', Math.round(snap.platform.today.cost * 100000) / 100000, 0.010000 + 0.0054 + 0.018)
+  check('today requests', snap.platform.ranges.today.requests, 33)
+  check('today cost', Math.round(snap.platform.ranges.today.cost * 100000) / 100000, 0.010000 + 0.0054 + 0.018)
   check('balance from credentials', snap.balance !== null && snap.balance.source, 'credentials')
   check('balance total', snap.balance.infos[0].total, 110)
   check('error cleared', snap.error, null)
@@ -181,9 +181,10 @@ async function main() {
   })
 
   console.log('· local DSH aggregation from session/event')
-  eventHandlers['session/event'](null, { type: 'assistant/message', usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 } })
+  // NOTE: the appended SessionEvent is { type, seq, time, data }; TokenUsage
+  // lives at event.data.usage ({ inputTokens, outputTokens, cacheReadTokens }).
+  eventHandlers['session/event'](null, { type: 'assistant/message', data: { usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 } } })
   eventHandlers['session/event'](null, { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'x' } })
-  eventHandlers['session/event'](null, { type: 'assistant/message' })
   snap = harnessHandlers.snapshot()
   check('local requests', snap.local.requests, 1)
   check('local inputTokens', snap.local.inputTokens, 100)

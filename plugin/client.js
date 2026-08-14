@@ -19,11 +19,12 @@
  * `host.call('setConfig', …)`.
  */
 
-// ---- store: snapshot + config facts + placement, version-proof React binding ----
+// ---- store: snapshot + config facts + placement + input drafts, version-proof React binding ----
 let state = {
   data: null,
-  config: { hasToken: false, hasApiKey: false, apiKeySource: 'credentials' },
+  config: { hasToken: false, hasApiKey: false, apiKeySource: 'credentials', tokenLength: 0, apiKeyLength: 0 },
   position: 'bottom-right', // dock | top-right | bottom-right
+  draft: { token: '', apiKey: '' }, // input drafts, survive collapse/expand
   status: 'loading', // loading | ok | error
   message: null,
 }
@@ -32,6 +33,9 @@ const listeners = new Set()
 function setState(patch) {
   state = Object.assign({}, state, patch)
   for (const fn of listeners) fn()
+}
+function setDraft(patch) {
+  setState({ draft: Object.assign({}, state.draft, patch) })
 }
 function subscribe(fn) {
   listeners.add(fn)
@@ -55,7 +59,15 @@ async function refresh() {
 async function refreshConfig() {
   try {
     const cfg = await host.call('getConfig')
-    if (cfg && typeof cfg === 'object') setState({ config: cfg })
+    if (cfg && typeof cfg === 'object') {
+      setState({ config: cfg })
+      // Self-heal: if the host lost the token (e.g. the host half restarted),
+      // re-send the saved config from the browser.
+      const saved = readSaved()
+      if (!cfg.hasToken && (saved.token || saved.apiKey)) {
+        host.call('setConfig', { token: saved.token || '', apiKey: saved.apiKey || '' }).catch(() => {})
+      }
+    }
   } catch (e) {
     // non-fatal
   }
@@ -209,28 +221,42 @@ function CompactBody(props) {
     )
   }
   if (status === 'ok') {
+    // Show the REAL reason the platform section is empty (missing token vs a
+    // failed/unauthorized fetch) instead of always claiming "not configured".
+    const err = data && data.error
+    if (err && err.indexOf('未配置平台 Token') !== 0) {
+      return React.createElement('span', { className: 'dshup-err', title: err },
+        '平台数据获取失败：' + (err.length > 42 ? err.slice(0, 42) + '…' : err))
+    }
     return React.createElement('span', { className: 'dshup-hint' }, '未配置平台 Token，点击展开配置（DSH 实时用量将自动统计）')
   }
   return React.createElement('span', { className: 'dshup-hint' }, '加载中…')
 }
 
 function Detail(props) {
-  const { data, config, position } = props
-  const [token, setToken] = React.useState('')
-  const [apiKey, setApiKey] = React.useState('')
+  const { data } = props
+  const s = useStore()
+  const config = s.config
+  const position = s.position
+  const draft = s.draft
   const [saved, setSaved] = React.useState(false)
+  const [saveMsg, setSaveMsg] = React.useState('')
   const p = data && data.platform
   const l = data && data.local
   const b = data && data.balance
 
   const save = () => {
-    writeSaved({ token, apiKey })
-    host.call('setConfig', { token, apiKey }).then(() => {
+    writeSaved({ token: draft.token, apiKey: draft.apiKey })
+    host.call('setConfig', { token: draft.token, apiKey: draft.apiKey }).then(() => {
       setSaved(true)
+      setSaveMsg('')
       refresh()
       setTimeout(() => setSaved(false), 2000)
-    }).catch(() => {})
+    }).catch((e) => {
+      setSaveMsg('保存失败（与 Host 通信出错）：' + String(e && e.message || e))
+    })
   }
+  const forceRefresh = () => { host.call('refresh').then(() => refresh()).catch(() => refresh()) }
   const resetLocal = () => { host.call('resetLocal').then(() => refresh()).catch(() => {}) }
 
   const rows = []
@@ -307,23 +333,31 @@ function Detail(props) {
       React.createElement('option', { value: 'dock' }, '输入框下方（对话栏）'))))
 
   rows.push(React.createElement('div', { key: 'sec-c', className: 'dshup-sec' }, '配置'))
+  rows.push(React.createElement('div', { key: 'host-state', className: 'dshup-hint' },
+    'Host 状态：' + (config.hasToken
+      ? '已收到平台 Token（长度 ' + (config.tokenLength || 0) + '）'
+      : '尚未收到平台 Token')
+    + (config.hasApiKey ? '；已收到 API Key' : '') + '。'))
   rows.push(React.createElement('div', { key: 'cfg', className: 'dshup-form' },
     React.createElement('label', null,
       React.createElement('span', null, 'platform.deepseek.com 的 userToken' + (config.hasToken ? '（已配置）' : '（未配置）')),
       React.createElement('input', {
         type: 'password', placeholder: '登录 platform.deepseek.com 后：F12 → Application → Local Storage → userToken',
-        value: token, onChange: (e) => setToken(e.target.value),
+        value: draft.token, onChange: (e) => setDraft({ token: e.target.value }),
       })),
     React.createElement('label', null,
       React.createElement('span', null, 'DeepSeek API Key（可选，仅用于余额；留空则用 DSH 凭据）'),
       React.createElement('input', {
-        type: 'password', placeholder: 'sk-…', value: apiKey, onChange: (e) => setApiKey(e.target.value),
+        type: 'password', placeholder: 'sk-…', value: draft.apiKey, onChange: (e) => setDraft({ apiKey: e.target.value }),
       })),
-    React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+    React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
       React.createElement('button', { className: 'dshup-btn', onClick: save }, saved ? '已保存 ✓' : '保存并刷新'),
+      React.createElement('button', { className: 'dshup-btn', onClick: forceRefresh }, '立即刷新'),
       React.createElement('span', { className: 'dshup-hint' },
         'Token 仅保存在本机浏览器与 DSH 内存中，不会写入对话。'),
-    )))
+    ),
+    saveMsg ? React.createElement('div', { className: 'dshup-err' }, saveMsg) : null,
+  ))
 
   rows.push(React.createElement('div', { key: 'meta', className: 'dshup-hint' },
     '更新于 ' + fmtTime(data.lastUpdated) + (data.error ? ' · 上次错误：' + data.error : '')))
@@ -343,7 +377,7 @@ function UsageDock() {
     React.createElement('span', { className: 'dshup-caret' }, expanded ? '▾' : '▸'),
   )]
   if (expanded) {
-    children.push(React.createElement(Detail, { key: 'detail', data: s.data, config: s.config, position: s.position }))
+    children.push(React.createElement(Detail, { key: 'detail', data: s.data }))
   }
   return React.createElement('div', null, children)
 }
@@ -359,7 +393,7 @@ function UsageFloat() {
   const children = []
   if (expanded) {
     children.push(React.createElement('div', { key: 'card', className: 'dshup-card' },
-      React.createElement(Detail, { data: s.data, config: s.config, position: s.position })))
+      React.createElement(Detail, { data: s.data })))
   }
   children.push(React.createElement('div', {
     key: 'pill', className: 'dshup-pill', onClick: () => setExpanded(!expanded),
@@ -383,11 +417,14 @@ return {
     // styles.insert returns a disposer; unload cleans everything anyway.
     styles.insert(CSS)
 
-    // Restore saved config: position locally, secrets pushed to the host.
+    // Restore saved config: position locally, secrets pushed to the host, and
+    // input drafts prefilled so collapse/expand never loses what was typed.
     const saved = readSaved()
-    if (saved.position === 'dock' || saved.position === 'top-right' || saved.position === 'bottom-right') {
-      setState({ position: saved.position })
-    }
+    setState({
+      position: (saved.position === 'dock' || saved.position === 'top-right' || saved.position === 'bottom-right')
+        ? saved.position : 'bottom-right',
+      draft: { token: saved.token || '', apiKey: saved.apiKey || '' },
+    })
     if (saved.token || saved.apiKey) {
       host.call('setConfig', { token: saved.token || '', apiKey: saved.apiKey || '' }).catch(() => {})
     }

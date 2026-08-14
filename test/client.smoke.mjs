@@ -76,10 +76,11 @@ const SNAPSHOT = {
 
 const hostCalls = []
 const hostStub = {
+  getConfigResult: SNAPSHOT.config,
   call: async (method, args) => {
     hostCalls.push({ method, args })
     if (method === 'snapshot') return SNAPSHOT
-    if (method === 'getConfig') return SNAPSHOT.config
+    if (method === 'getConfig') return hostStub.getConfigResult
     if (method === 'setConfig') return { ok: true }
     return null
   },
@@ -162,13 +163,22 @@ async function main() {
   // to reach the position <select>.
   const detailEl = flatChildren(f4).find(c => c.type && c.type.name === 'Detail')
   check('detail element present when hovered', detailEl !== undefined, true)
-  const detail = renderWith(detailEl.type, { data: SNAPSHOT, config: SNAPSHOT.config, position: 'bottom-right' })
+  const detail = renderWith(detailEl.type, { data: SNAPSHOT })
   const select = findSelect(detail)
   check('position select rendered', select !== null, true)
   select.props.onChange({ target: { value: 'dock' } })
   check('dock renders after switch', render(Dock) !== null, true)
   check('float null after switch', render(Float) === null, true)
   check('position persisted', JSON.parse(storage.get('dsh-usage.config') || '{}').position, 'dock')
+
+  console.log('· self-heal: host without token gets the saved config re-sent')
+  hostStub.getConfigResult = { hasToken: false, hasApiKey: false, apiKeySource: 'credentials', tokenLength: 0, apiKeyLength: 0 }
+  const before = hostCalls.filter(c => c.method === 'setConfig').length
+  ctxStub.intervals[1]() // refreshConfig
+  await new Promise(r => setTimeout(r, 20))
+  const resent = hostCalls.filter(c => c.method === 'setConfig')
+  check('setConfig re-sent when host lost token', resent.length > before, true)
+  check('re-sent with saved token', resent[resent.length - 1].args.token, 'tok-saved')
 
   console.log('· saved config replayed to host on apply')
   check('setConfig called at least once', hostCalls.filter(c => c.method === 'setConfig').length >= 1, true)

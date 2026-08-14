@@ -121,7 +121,8 @@ async function main() {
         const auth = (payload.headers && payload.headers.Authorization) || ''
         let text = ''
         if (auth.includes('FAIL')) return { exitCode: 1, stdout: { text: '', truncated: false }, stderr: { text: 'HTTP 401 unauthorized' } }
-        if (url.includes('/usage/amount')) text = JSON.stringify(AMOUNT_FIXTURE)
+        if (auth.includes('tok-bad')) text = JSON.stringify({ code: 40003, msg: 'Authorization Failed (invalid token)', data: null })
+        else if (url.includes('/usage/amount')) text = JSON.stringify(AMOUNT_FIXTURE)
         else if (url.includes('/usage/cost')) text = JSON.stringify(COST_FIXTURE)
         else if (url.includes('/user/balance')) text = JSON.stringify(BALANCE_FIXTURE)
         return { exitCode: 0, stdout: { text, truncated: false }, stderr: { text: '' } }
@@ -131,8 +132,12 @@ async function main() {
   const stubHarness = { handle: (method, fn) => { harnessHandlers[method] = fn } }
   const stubConsole = { log: () => {}, error: (m) => console.error('  [host console.error]', m) }
 
-  const factory = new Function('ctx', 'harness', 'console', `return (async () => {\n${hostSource}\n})()`)
-  const plugin = await factory(stubCtx, stubHarness, stubConsole)
+  // Evaluate exactly like the REAL host sandbox: only `harness` and `console`
+  // exist as free variables — `ctx` must NOT be one. A module-level function
+  // referencing `ctx` (the bug that produced "ctx is not defined" in the real
+  // panel) therefore throws here instead of shipping.
+  const factory = new Function('harness', 'console', `return (async () => {\n${hostSource}\n})()`)
+  const plugin = await factory(stubHarness, stubConsole)
   plugin.apply(stubCtx)
 
   const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms))
@@ -140,7 +145,7 @@ async function main() {
   console.log('· plugin shape')
   check('plugin has name', plugin.name, 'dsh-usage-panel-host')
   check('injects shell/timer/credentials', plugin.inject, ['shell', 'timer', 'credentials'])
-  check('handlers registered', Object.keys(harnessHandlers).sort(), ['getConfig', 'resetLocal', 'setConfig', 'snapshot'])
+  check('handlers registered', Object.keys(harnessHandlers).sort(), ['getConfig', 'refresh', 'resetLocal', 'setConfig', 'snapshot'])
   check('session/event subscribed', typeof eventHandlers['session/event'], 'function')
 
   console.log('· initial state (no token, but DSH credentials resolve a key)')
@@ -171,7 +176,9 @@ async function main() {
   check('balance from credentials', snap.balance !== null && snap.balance.source, 'credentials')
   check('balance total', snap.balance.infos[0].total, 110)
   check('error cleared', snap.error, null)
-  check('config facts', snap.config, { hasToken: true, hasApiKey: false, apiKeySource: 'credentials' })
+  check('config facts', snap.config, {
+    hasToken: true, hasApiKey: false, apiKeySource: 'credentials', tokenLength: 7, apiKeyLength: 0,
+  })
 
   console.log('· local DSH aggregation from session/event')
   eventHandlers['session/event'](null, { type: 'assistant/message', usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 } })
@@ -197,9 +204,17 @@ async function main() {
   check('error surfaces http status', snap.error !== null && snap.error.includes('401'), true)
   check('local survives failure', typeof snap.local.requests, 'number')
 
+  console.log('· platform business error (invalid token -> code 40003)')
+  harnessHandlers.setConfig({ token: 'tok-bad' })
+  await tick()
+  snap = harnessHandlers.snapshot()
+  check('platform null on 40003', snap.platform, null)
+  check('error surfaces 40003', snap.error !== null && snap.error.includes('40003'), true)
+
   console.log('· getConfig never echoes secrets')
   const cfg = harnessHandlers.getConfig()
   check('no token in getConfig', JSON.stringify(cfg).includes('tok-abc'), false)
+  check('getConfig reports token length', cfg.tokenLength, 7)
 
   console.log('· setConfig stores trimmed values')
   harnessHandlers.setConfig({ token: '  tok-xyz  ', apiKey: ' sk-1 ' })

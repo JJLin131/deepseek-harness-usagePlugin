@@ -4,14 +4,15 @@
  * Runs as the body of an async function in the page; closure symbols are
  * React, console, styles, host (no imports, no JSX, no global timers).
  *
- * Placement is user-selectable and remembered in localStorage:
- *   - 'dock'       -> a readout line in the band under the composer
- *                     (slot `conversation.composer.dock`)
- *   - 'top-right'  -> a floating widget pinned to the top-right corner
- *   - 'bottom-right' -> a floating widget pinned to the bottom-right corner
+ * Two placement modes, user-selectable and remembered in localStorage:
+ *   - 'float' -> a whale-badge floating widget you can DRAG anywhere with the
+ *                mouse; its position (left/top) is persisted. Hovering the
+ *                widget auto-expands the full detail card; clicking the badge
+ *                toggles it too (drag is suppressed so dragging never toggles).
+ *   - 'dock'  -> a readout line in the band under the composer
+ *                (slot `conversation.composer.dock`).
  * The floating widget lives in the frame-wide `shell.overlay` slot (root
- * scope: visible with or without a session) and the component returns null
- * unless its position matches, so only one surface renders at a time.
+ * scope: visible with or without a session).
  *
  * The host half owns all network access; this half polls
  * `host.call('snapshot')` every 2s, keeps the user's platform userToken /
@@ -19,11 +20,13 @@
  * `host.call('setConfig', …)`.
  */
 
-// ---- store: snapshot + config facts + placement + input drafts, version-proof React binding ----
+// ---- store: snapshot + config facts + placement + input drafts ----
 let state = {
   data: null,
   config: { hasToken: false, hasApiKey: false, apiKeySource: 'credentials', tokenLength: 0, apiKeyLength: 0 },
-  position: 'bottom-right', // dock | top-right | bottom-right
+  position: 'float', // float (draggable) | dock
+  floatPos: null, // { x, y } px (left/top); null = default corner
+  dragging: false,
   draft: { token: '', apiKey: '' }, // input drafts, survive collapse/expand
   status: 'loading', // loading | ok | error
   message: null,
@@ -90,9 +93,22 @@ function writeSaved(patch) {
   return next
 }
 function setPosition(pos) {
-  if (pos !== 'dock' && pos !== 'top-right' && pos !== 'bottom-right') return
+  if (pos !== 'float' && pos !== 'dock') return
   writeSaved({ position: pos })
   setState({ position: pos })
+}
+// Default corner when the user has never dragged the widget: bottom-right.
+function defaultFloatPos() {
+  const w = window.innerWidth || 1280
+  const h = window.innerHeight || 800
+  return { x: Math.max(8, w - 260), y: Math.max(8, h - 90) }
+}
+function savedFloatPos() {
+  const saved = readSaved()
+  if (typeof saved.floatX === 'number' && typeof saved.floatY === 'number') {
+    return { x: saved.floatX, y: saved.floatY }
+  }
+  return null
 }
 
 // ---- formatting ----
@@ -159,22 +175,25 @@ const CSS = `
 }
 .dshup-btn:hover { border-color: var(--dsw-alias-brand-primary); }
 .dshup-hint { opacity: .75; font-size: 11px; }
-/* floating widget */
+/* floating widget (draggable) */
 .dshup-float {
   position: fixed; z-index: 900; pointer-events: auto;
   font-size: 12px; color: var(--dsw-alias-label-secondary);
   display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  cursor: grab; touch-action: none;
 }
-.dshup-float-tr { top: 14px; right: 18px; }
-.dshup-float-br { bottom: 18px; right: 18px; flex-direction: column-reverse; }
+.dshup-float.dshup-dragging { cursor: grabbing; }
+/* Near the bottom of the viewport the detail card opens upward (above the pill). */
+.dshup-float.dshup-open-up { flex-direction: column-reverse; }
 .dshup-pill {
-  display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
-  padding: 6px 12px; border-radius: 999px;
+  display: flex; align-items: center; gap: 8px; cursor: inherit; user-select: none;
+  padding: 5px 12px 5px 9px; border-radius: 999px;
   background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1);
   box-shadow: 0 2px 10px rgba(0, 0, 0, .12);
   white-space: nowrap;
 }
 .dshup-pill:hover { border-color: var(--dsw-alias-brand-primary); }
+.dshup-whale { display: flex; align-items: center; flex: none; }
 .dshup-card {
   padding: 10px 12px; border-radius: 10px; width: min(430px, calc(100vw - 36px));
   background: var(--dsw-alias-bg-overlay); border: 1px solid var(--dsw-alias-border-l1);
@@ -187,6 +206,17 @@ function useStore() {
   const [, force] = React.useState(0)
   React.useEffect(() => subscribe(() => force(n => n + 1)), [])
   return getState()
+}
+
+// Official DeepSeek whale mark (cdn.deepseek.com/favicon.svg), inline SVG.
+function WhaleIcon() {
+  return React.createElement('svg', {
+    viewBox: '0 0 50 50', width: 20, height: 20, 'aria-hidden': true, focusable: 'false',
+  },
+    React.createElement('path', {
+      d: 'M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z',
+      fill: '#4D6BFE', fillRule: 'nonzero',
+    }))
 }
 
 function StatusDot(props) {
@@ -204,9 +234,6 @@ function CompactBody(props) {
     const t = p.totals
     return React.createElement(React.Fragment, null,
       React.createElement('span', null, '请求 ', React.createElement('b', { className: 'dshup-num' }, fmtInt(t.requests))),
-      React.createElement('span', null, '输入 ', React.createElement('b', { className: 'dshup-num' }, fmtTokens(t.input)),
-        ' · 缓存 ', React.createElement('b', { className: 'dshup-num' }, t.cacheHitRate + '%')),
-      React.createElement('span', null, '输出 ', React.createElement('b', { className: 'dshup-num' }, fmtTokens(t.output))),
       React.createElement('span', null, '费用 ', React.createElement('b', { className: 'dshup-accent' }, fmtMoney(t.cost, p.currency))),
       React.createElement('span', { className: 'dshup-hint' }, '（' + p.month + '）'),
     )
@@ -214,9 +241,6 @@ function CompactBody(props) {
   if (l && l.requests > 0) {
     return React.createElement(React.Fragment, null,
       React.createElement('span', null, 'DSH 实时 ', React.createElement('b', { className: 'dshup-num' }, fmtInt(l.requests)), ' 次'),
-      React.createElement('span', null, '输入 ', React.createElement('b', { className: 'dshup-num' }, fmtTokens(l.inputTokens)),
-        ' · 缓存 ', React.createElement('b', { className: 'dshup-num' }, fmtTokens(l.cacheReadTokens))),
-      React.createElement('span', null, '输出 ', React.createElement('b', { className: 'dshup-num' }, fmtTokens(l.outputTokens))),
       React.createElement('span', null, '估算 ', React.createElement('b', { className: 'dshup-accent' }, '$' + (l.estimatedCostUsd || 0).toFixed(4))),
     )
   }
@@ -228,7 +252,7 @@ function CompactBody(props) {
       return React.createElement('span', { className: 'dshup-err', title: err },
         '平台数据获取失败：' + (err.length > 42 ? err.slice(0, 42) + '…' : err))
     }
-    return React.createElement('span', { className: 'dshup-hint' }, '未配置平台 Token，点击展开配置（DSH 实时用量将自动统计）')
+    return React.createElement('span', { className: 'dshup-hint' }, '未配置平台 Token，点击展开配置')
   }
   return React.createElement('span', { className: 'dshup-hint' }, '加载中…')
 }
@@ -328,8 +352,7 @@ function Detail(props) {
   rows.push(React.createElement('div', { key: 'sec-pos', className: 'dshup-sec' }, '显示位置'))
   rows.push(React.createElement('div', { key: 'pos', className: 'dshup-form' },
     React.createElement('select', { value: position, onChange: (e) => setPosition(e.target.value) },
-      React.createElement('option', { value: 'bottom-right' }, '右下角浮窗'),
-      React.createElement('option', { value: 'top-right' }, '右上角浮窗'),
+      React.createElement('option', { value: 'float' }, '悬浮窗（可拖动）'),
       React.createElement('option', { value: 'dock' }, '输入框下方（对话栏）'))))
 
   rows.push(React.createElement('div', { key: 'sec-c', className: 'dshup-sec' }, '配置'))
@@ -382,30 +405,74 @@ function UsageDock() {
   return React.createElement('div', null, children)
 }
 
-// Floating variant: a corner pill that auto-expands the full card on hover.
-// The whole container (pill + card) owns the hover so moving from the pill to
-// the card never collapses it; clicking the pill toggles as well (touch users).
+// Floating variant: a draggable whale badge. Hover expands the card (suppressed
+// while dragging); dragging never toggles; the position persists on mouseup.
 function UsageFloat() {
   const s = useStore()
   const [expanded, setExpanded] = React.useState(false)
-  if (s.position !== 'top-right' && s.position !== 'bottom-right') return null
-  const corner = s.position === 'top-right' ? 'dshup-float-tr' : 'dshup-float-br'
+  const dragRef = React.useRef({ sx: 0, sy: 0, ox: 0, oy: 0, moved: false })
+  if (s.position !== 'float') return null
+
+  const pos = s.floatPos || defaultFloatPos()
+  const openUp = pos.y > (window.innerHeight || 800) / 2
+
+  const onPillMouseDown = (e) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const base = s.floatPos || defaultFloatPos()
+    const d = dragRef.current
+    d.sx = e.clientX
+    d.sy = e.clientY
+    d.ox = base.x
+    d.oy = base.y
+    d.moved = false
+    setState({ dragging: true })
+    const vw = () => window.innerWidth || 2000
+    const vh = () => window.innerHeight || 1500
+    const onMove = (ev) => {
+      const dx = ev.clientX - d.sx
+      const dy = ev.clientY - d.sy
+      if (!d.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) d.moved = true
+      setState({
+        floatPos: {
+          x: Math.max(4, Math.min(vw() - 40, d.ox + dx)),
+          y: Math.max(4, Math.min(vh() - 30, d.oy + dy)),
+        },
+      })
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      setState({ dragging: false })
+      if (dragRef.current.moved && state.floatPos) {
+        writeSaved({ floatX: state.floatPos.x, floatY: state.floatPos.y })
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
   const children = []
   if (expanded) {
     children.push(React.createElement('div', { key: 'card', className: 'dshup-card' },
       React.createElement(Detail, { data: s.data })))
   }
   children.push(React.createElement('div', {
-    key: 'pill', className: 'dshup-pill', onClick: () => setExpanded(!expanded),
+    key: 'pill',
+    className: 'dshup-pill',
+    onMouseDown: onPillMouseDown,
+    onClick: () => { if (!dragRef.current.moved) setExpanded(!expanded) },
+    title: 'API 用量（按住拖动可移动位置）',
   },
-    React.createElement(StatusDot, { error: s.data && s.data.error }),
-    React.createElement('span', { className: 'dshup-title' }, 'API 用量'),
+    React.createElement('span', { className: 'dshup-whale' }, React.createElement(WhaleIcon, null)),
     React.createElement(CompactBody, { data: s.data, status: s.status }),
     React.createElement('span', { className: 'dshup-caret' }, expanded ? '▾' : '▸'),
   ))
+
   return React.createElement('div', {
-    className: 'dshup-float ' + corner,
-    onMouseEnter: () => setExpanded(true),
+    className: 'dshup-float' + (s.dragging ? ' dshup-dragging' : '') + (openUp ? ' dshup-open-up' : ''),
+    style: { left: pos.x + 'px', top: pos.y + 'px' },
+    onMouseEnter: () => { if (!s.dragging) setExpanded(true) },
     onMouseLeave: () => setExpanded(false),
   }, children)
 }
@@ -420,9 +487,15 @@ return {
     // Restore saved config: position locally, secrets pushed to the host, and
     // input drafts prefilled so collapse/expand never loses what was typed.
     const saved = readSaved()
+    let position = saved.position
+    if (position !== 'float' && position !== 'dock') {
+      // Legacy corner presets migrate to the draggable float mode.
+      position = 'float'
+      writeSaved({ position })
+    }
     setState({
-      position: (saved.position === 'dock' || saved.position === 'top-right' || saved.position === 'bottom-right')
-        ? saved.position : 'bottom-right',
+      position,
+      floatPos: savedFloatPos(),
       draft: { token: saved.token || '', apiKey: saved.apiKey || '' },
     })
     if (saved.token || saved.apiKey) {
@@ -440,7 +513,7 @@ return {
       UsageDock,
     ))
 
-    // Floating corner widget (frame-wide, session-independent).
+    // Floating whale badge (frame-wide, session-independent, draggable).
     ctx.slots.inject('shell.overlay', () => ctx.slots.register(
       { name: 'shell.overlay', id: 'usage-float', order: 50, label: 'API 用量浮窗' },
       UsageFloat,

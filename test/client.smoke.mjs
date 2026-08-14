@@ -31,7 +31,18 @@ const localStorageStub = {
 // make it resolvable from the evaluated closure's scope.
 globalThis.localStorage = localStorageStub
 // Seed a previously-saved config so apply() must replay it to the host.
+// position 'bottom-right' is a legacy corner preset — apply() must migrate it.
 storage.set('dsh-usage.config', JSON.stringify({ token: 'tok-saved', apiKey: 'sk-saved', position: 'bottom-right' }))
+
+// window stub: innerWidth/innerHeight for the default float position, and
+// event-listener capture so the drag handlers can be driven manually.
+const winListeners = {}
+globalThis.window = {
+  innerWidth: 1280,
+  innerHeight: 800,
+  addEventListener: (type, fn) => { winListeners[type] = fn },
+  removeEventListener: (type) => { delete winListeners[type] },
+}
 
 // A minimal stateful React stub: useState persists per (component, hook index)
 // so repeated component invocations behave like re-renders. `render(fn)` resets
@@ -58,6 +69,11 @@ const ReactStub = {
     return [hookStore.get(key), set]
   },
   useEffect: () => {},
+  useRef: (init) => {
+    const key = currentComponent + ':ref:' + hookCursor++
+    if (!hookStore.has(key)) hookStore.set(key, { current: init })
+    return hookStore.get(key)
+  },
   Fragment: Symbol('Fragment'),
 }
 
@@ -140,10 +156,12 @@ async function main() {
   check('dock component captured', typeof Dock, 'function')
   check('float component captured', typeof Float, 'function')
 
-  console.log('· default placement (bottom-right)')
+  console.log('· default placement (legacy corner preset migrates to draggable float)')
   check('dock renders null', render(Dock) === null, true)
   const f0 = render(Float)
   check('float renders', f0 !== null && f0.type === 'div', true)
+  check('position migrated to float', JSON.parse(storage.get('dsh-usage.config') || '{}').position, 'float')
+  check('default float position is bottom-right', f0.props.style.left, '1020px')
 
   console.log('· hover wiring on the floating widget')
   check('mouseenter expands', typeof f0.props.onMouseEnter, 'function')
@@ -154,6 +172,27 @@ async function main() {
   f1.props.onMouseLeave()
   const f2 = render(Float)
   check('card hides on leave', flatChildren(f2).some(c => c.props && c.props.className === 'dshup-card'), false)
+
+  console.log('· drag: mousedown -> mousemove -> mouseup moves and persists the position')
+  const fDrag = render(Float)
+  const pill = flatChildren(fDrag).find(c => c.props && c.props.className === 'dshup-pill')
+  check('pill has mousedown handler', typeof pill.props.onMouseDown, 'function')
+  pill.props.onMouseDown({ button: 0, clientX: 100, clientY: 100, preventDefault() {} })
+  check('window mousemove listener attached', typeof winListeners.mousemove, 'function')
+  winListeners.mousemove({ clientX: 160, clientY: 130 })
+  const fMoved = render(Float)
+  check('position updated while dragging', fMoved.props.style.left, '1080px')
+  check('dragging class applied', fMoved.props.className.includes('dshup-dragging'), true)
+  winListeners.mouseup({})
+  check('listeners cleaned up', winListeners.mousemove === undefined, true)
+  const saved = JSON.parse(storage.get('dsh-usage.config') || '{}')
+  check('position persisted on mouseup', saved.floatX, 1080)
+  check('position persisted on mouseup (y)', saved.floatY, 740)
+  // A drag must not toggle the expanded card.
+  const fAfterDrag = render(Float)
+  check('drag did not expand', flatChildren(fAfterDrag).some(c => c.props && c.props.className === 'dshup-card'), false)
+  pill.props.onClick()
+  check('click after drag still suppressed (moved flag)', flatChildren(render(Float)).some(c => c.props && c.props.className === 'dshup-card'), false)
 
   console.log('· position switch to dock')
   const f3 = render(Float)

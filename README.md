@@ -56,7 +56,8 @@ test/
     按位置设置只渲染其一；
   - 每 2 秒 `host.call('snapshot')` 轮询；`userToken`/API Key 存于本机 `localStorage` 并推给 host，
     host 从不把密钥回传页面（`getConfig` 只返回布尔事实）；
-  - 悬浮胶囊容器 `onMouseEnter`/`onMouseLeave` 自动展开/收起完整卡片（移动到卡片不闪烁）。
+  - 鲸鱼悬浮窗（无胶囊/文字，仅官方 DeepSeek 鲸鱼图标）容器 `onMouseEnter`/`onMouseLeave`
+    自动展开/收起完整卡片（移动到卡片不闪烁）；按住图标可拖动到任意位置并记忆。
 
 ## 测试
 

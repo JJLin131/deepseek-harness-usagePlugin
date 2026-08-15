@@ -1,6 +1,6 @@
 # dsh-usage-panel
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 界面的第三方用量面板。安装后随 `pnpm dsh web` 自动加载，不需要修改 Harness 源码、手写 YAML、创建 junction/symlink 或重新打包 client。
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 界面的第三方用量面板。安装后随 `pnpm dsh web` 自动加载。
 
 ## 项目截图
 - 支持任意位置拖动的悬浮窗

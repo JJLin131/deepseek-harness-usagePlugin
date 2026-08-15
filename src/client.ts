@@ -1,22 +1,16 @@
 /**
- * DeepSeek Usage Panel — CLIENT half (browser). Dashboard v6.
+ * DeepSeek 用量面板 — 浏览器半（静态 dsh.client web 插件，随 DSH 启动自动注入页面）。
  *
- * Runs as the body of an async function in the page; closure symbols are
- * React, console, styles, host (no imports, no JSX, no global timers).
- *
- * Features:
- *   - Time-range selector: 今日 / 昨日 / 本周 / 本月. Each range shows the
- *     complete info set (cost hero, request/hit-rate/output chips, token-mix
- *     meters, per-model bars) computed host-side (`platform.ranges`).
- *   - Token-consumption chart with granularity matched to the range: hour
- *     buckets for 今日/昨日 (from the DSH session's own hourly buckets —
- *     the platform only exposes day granularity), day buckets for 本周/本月
- *     (from `platform.days`). Stacked bars: cache-hit input / cache-miss
- *     input / output.
- *   - Floating whale badge (draggable, 350ms hover-expand) or composer dock.
- *   - Config form (userToken / API key), balance card, DSH live stats.
- * All UI is hand-rolled React.createElement + inline SVG + plain CSS.
+ * 面板 UI 延续原有交互，发布接线收敛为当前根包的静态 Client 插件：
+ *  - RPC：所有调用集中到 usage-api adapter，经 connection.rpc.call 访问 usage/*。
+ *  - CSS：styles.insert(CSS)（动态沙箱自由变量）-> injectStyles(CSS)（模块内 <style> 注入，
+ *    带 data-plugin 标签，卸载时由 clientModules 认领/清理）。
+ *  - 导出形态：export const inject + export function apply(ctx)（静态客户端插件契约）。
+ *  - React 来自平台模块 'react'（external），不 import 任何 @deepseek-ai 值。
  */
+
+import React from 'react'
+import { createUsageApi } from './client/usage-api.ts'
 
 // ---- palette (DeepSeek 开放平台品牌风格,主色 #4D6BFE) ----
 // 用量构成三色:平台浅蓝基础上整体加深一档(原 #b9d9fa+67%白 / #73b2f5+33%白 / #509ff3+17%白 太接近背景色)
@@ -32,6 +26,18 @@ const RANGES = [
   { k: 'month', label: '本月' },
 ]
 
+// ---- 静态版接线：Remote 句柄 + CSS 注入（host.call / styles.insert 的替代）----
+let api = null
+let cssInjected = false
+function injectStyles(css) {
+  if (cssInjected || typeof document === 'undefined') return
+  cssInjected = true
+  const tag = document.createElement('style')
+  tag.dataset.plugin = 'dsh-usage-panel'
+  tag.textContent = css
+  document.head.appendChild(tag)
+}
+
 // ---- store: snapshot + config facts + placement + input drafts ----
 let state = {
   data: null,
@@ -43,7 +49,7 @@ let state = {
   status: 'loading', // loading | ok | error
   message: null,
 }
-const listeners = new Set()
+const listeners = new Set<() => void>()
 
 function setState(patch) {
   state = Object.assign({}, state, patch)
@@ -63,7 +69,7 @@ async function refresh() {
   if (polling) return
   polling = true
   try {
-    const data = await host.call('snapshot')
+    const data = await api.snapshot()
     setState({ data, status: 'ok', message: null })
   } catch (e) {
     setState({ status: 'error', message: String(e && e.message || e) })
@@ -73,12 +79,12 @@ async function refresh() {
 }
 async function refreshConfig() {
   try {
-    const cfg = await host.call('getConfig')
+    const cfg = await api.getConfig()
     if (cfg && typeof cfg === 'object') {
       setState({ config: cfg })
       const saved = readSaved()
       if (!cfg.hasToken && (saved.token || saved.apiKey)) {
-        host.call('setConfig', { token: saved.token || '', apiKey: saved.apiKey || '' }).catch(() => {})
+        api.setConfig({ token: saved.token || '', apiKey: saved.apiKey || '' }).catch(() => {})
       }
     }
   } catch (e) {
@@ -464,7 +470,7 @@ function Detail(props) {
 
   const save = () => {
     writeSaved({ token: draft.token, apiKey: draft.apiKey })
-    host.call('setConfig', { token: draft.token, apiKey: draft.apiKey }).then(() => {
+    api.setConfig({ token: draft.token, apiKey: draft.apiKey }).then(() => {
       setSaved(true)
       setSaveMsg('')
       refresh()
@@ -473,8 +479,8 @@ function Detail(props) {
       setSaveMsg('保存失败（与 Host 通信出错）：' + String(e && e.message || e))
     })
   }
-  const forceRefresh = () => { host.call('refresh').then(() => refresh()).catch(() => refresh()) }
-  const resetLocal = () => { host.call('resetLocal').then(() => refresh()).catch(() => {}) }
+  const forceRefresh = () => { api.refresh().then(() => refresh()).catch(() => refresh()) }
+  const resetLocal = () => { api.resetLocal().then(() => refresh()).catch(() => {}) }
 
   const rows = []
 
@@ -860,40 +866,41 @@ function UsageFloat() {
   }, children)
 }
 
-// ---- plugin ----
-return {
-  inject: ['slots', 'timer'],
-  apply(ctx) {
-    styles.insert(CSS)
+// ---- 静态插件导出：bundle 的 module.exports = { inject, apply }，clientModules 挂载 ----
+export const inject = ['slots', 'timer', 'connection']
 
-    const saved = readSaved()
-    let position = saved.position
-    if (position !== 'float' && position !== 'dock') {
-      position = 'float'
-      writeSaved({ position })
-    }
-    setState({
-      position,
-      floatPos: savedFloatPos(),
-      draft: { token: saved.token || '', apiKey: saved.apiKey || '' },
-    })
-    if (saved.token || saved.apiKey) {
-      host.call('setConfig', { token: saved.token || '', apiKey: saved.apiKey || '' }).catch(() => {})
-    }
+export function apply(ctx) {
+  api = createUsageApi(ctx)
 
-    refresh()
-    refreshConfig()
-    ctx.interval(refresh, 2000)
-    ctx.interval(refreshConfig, 30 * 1000)
+  injectStyles(CSS)
 
-    ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
-      { name: 'conversation.composer.dock', id: 'usage', order: 50, label: 'API 用量' },
-      UsageDock,
-    ))
+  const saved = readSaved()
+  let position = saved.position
+  if (position !== 'float' && position !== 'dock') {
+    position = 'float'
+    writeSaved({ position })
+  }
+  setState({
+    position,
+    floatPos: savedFloatPos(),
+    draft: { token: saved.token || '', apiKey: saved.apiKey || '' },
+  })
+  if (saved.token || saved.apiKey) {
+    api.setConfig({ token: saved.token || '', apiKey: saved.apiKey || '' }).catch(() => {})
+  }
 
-    ctx.slots.inject('shell.overlay', () => ctx.slots.register(
-      { name: 'shell.overlay', id: 'usage-float', order: 50, label: 'API 用量浮窗' },
-      UsageFloat,
-    ))
-  },
+  refresh()
+  refreshConfig()
+  ctx.interval(refresh, 2000)
+  ctx.interval(refreshConfig, 30 * 1000)
+
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
+    { name: 'conversation.composer.dock', id: 'usage', order: 50, label: 'API 用量' },
+    UsageDock,
+  ))
+
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register(
+    { name: 'shell.overlay', id: 'usage-float', order: 50, label: 'API 用量浮窗' },
+    UsageFloat,
+  ))
 }

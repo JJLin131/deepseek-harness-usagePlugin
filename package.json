@@ -1,0 +1,77 @@
+{
+  "name": "dsh-usage-panel",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness 用量面板：平台用量、余额与本地会话 Token 统计",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-usage-panel": "./scripts/cli.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots",
+        "timer",
+        "connection"
+      ],
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.host.json && tsdown",
+    "dev": "tsdown --watch",
+    "pretest": "pnpm run build",
+    "test": "node --test test/*.test.mjs",
+    "test:package": "node --test test/package.test.mjs",
+    "test:pack": "node test/check-pack.mjs",
+    "test:compat:rc5": "node --import ./test/register-harness-compat.mjs --test test/host.test.mjs",
+    "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "prepack": "pnpm run build && pnpm run test:package"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.js.map",
+    "lib/client.js",
+    "lib/client.js.map",
+    "scripts/*.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JJLin131/deepseek-harness-usagePlugin.git"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "usage",
+    "plugin"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "cross-spawn": "7.0.6",
+    "yaml": "^2.8.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.5 <0.2.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.5",
+    "react": "^18.3.1",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3"
+  }
+}

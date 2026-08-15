@@ -1,86 +1,150 @@
-# dsh-UsagePlugin — DeepSeek 用量面板（DSH 动态插件）
+# dsh-usage-panel
 
-在 DSH（DeepSeek Harness）页面里**实时**展示 DeepSeek API 的消耗情况：
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 界面的第三方用量面板。安装后随 `pnpm dsh web` 自动加载，不需要修改 Harness 源码、手写 YAML、创建 junction/symlink 或重新打包 client。
 
-- **请求次数**
-- **Token 消耗拆分**：输入（命中缓存）、输入（未命中缓存）、输出
-- **消费金额**（平台实际计费，¥/CNY；DSH 本会话为 USD 估算）
-- **账户余额**（自动使用 DSH 的 `DEEPSEEK_API_KEY` 凭据）
-- **缓存命中率**、**按模型明细**
-- **时间范围切换**：今日 / 昨日 / 本周 / 本月，每个范围都有完整指标与
-  **Token 消耗堆叠图**（日范围按小时、周/月按天，横轴与所选范围一致）
-- **DSH 实时用量**（本会话，无需任何配置，从启用面板起累计）
+## 功能
 
-显示为可自由拖动的 DeepSeek 小鲸鱼悬浮窗：**鼠标按住可拖到任意位置**（位置自动记忆），
-卡片按视口自适应展开（下方→向上、右侧→向左等），**悬停自动展开**且移向卡片不闪关；
-也可切换为**输入框下方**（对话栏）模式。展开卡片只展示用量信息，
-「显示位置 / 配置」在右上角齿轮进入的独立设置视图，配置区带 `?` 获取 Token 教程。
+- 悬浮鲸鱼按钮，可拖动并记住位置，也可切换到输入框下方的 dock 模式
+- 今日、昨日、本周、本月用量
+- 缓存命中／未命中 Token、输出 Token、请求次数、模型与成本统计
+- DeepSeek 平台用量、账户余额和本地 DSH Session 实时用量
+- `userToken` / API Key 设置、刷新、重置本地统计和 localStorage 持久化
 
----
+## 要求
 
-## 数据来源
+- DeepSeek Harness `0.1.0-rc.5` 或兼容版本
+- Node.js `^22.19.0` 或 `>=24.0.0`
+- pnpm
+- 已创建 `~/.dsh/profiles/web`；通常首次运行 Harness Web 后即存在
 
-| 数据 | 接口 | 鉴权 |
-|---|---|---|
-| 平台用量（请求数、tokens、金额、按模型） | `https://platform.deepseek.com/api/v0/usage/amount`、`/usage/cost`（控制台私有接口） | 平台登录后的 `userToken`（浏览器 localStorage） |
-| 账户余额 | `https://api.deepseek.com/user/balance`（[官方公开接口](https://api-docs.deepseek.com/api/get-user-balance/)） | DSH 凭据 `DEEPSEEK_API_KEY`，或手动 API Key，或平台 Token |
-| DSH 本会话实时用量 | DSH `session/event`（`assistant/message` 携带 `TokenUsage`） | 无需鉴权 |
+## GitHub 安装
 
-平台接口结构取自公开资料（[CodexBar deepseek 文档](https://github.com/steipete/CodexBar/blob/main/docs/deepseek.md)、
-[deepseek-usage skill](https://github.com/OpenMinis/MinisSkills/tree/main/deepseek-usage)）。
-
----
-
-## 目录结构
-
-```
-plugin/
-  host.js      Host 半：抓取平台用量/余额 + 聚合 DSH 会话用量 + RPC（harness.handle）
-  client.js    Browser 半：可拖动的鲸鱼悬浮窗（悬停展开、位置记忆）+ 输入框下方两种 UI + 配置表单
-install/
-  INSTALL.md   安装到当前 DSH 的图文步骤（cordis_define + cordis_run）
-  define-payload.json   cordis_define 的完整参数（已生成）
-  build-payload.mjs     重新生成 define-payload.json
-test/
-  host.test.mjs      Host 半集成测试（桩 ctx.shell/credentials，用真实接口格式 fixture）
-  client.smoke.mjs   Client 半冒烟测试（桩 React/host/localStorage，验证槽位注册与悬停展开）
-```
-
-## 工作原理（双半插件）
-
-- **Host 半**（服务端，`node:vm` 沙箱内）：
-  - 用 `ctx.shell` 启动一个 `node` 子进程做 HTTP（沙箱无 `fetch`），请求体经环境变量传入，无引号转义问题；
-  - 每 60 秒拉取当月 `usage/amount` + `usage/cost`（容错解析 `biz_data.total/days`），并聚合出
-    请求次数、缓存命中/未命中、输出、金额（¥）与缓存命中率；同时按日序列与
-    今日/昨日/本周/本月四档范围（含按模型明细）预聚合，供时间范围选择器使用；
-  - 经 `ctx.credentials` 解析 `DEEPSEEK_API_KEY` 查询余额；
-  - 监听 `session/event`（TokenUsage 位于 `event.data.usage`）累计 DSH 本会话用量，
-    并按小时分桶（最近 48h）供日范围图表使用；
-  - 通过 `harness.handle` 暴露 `snapshot` / `getConfig` / `setConfig` / `resetLocal` / `refresh` 五个 RPC。
-- **Browser 半**（页面内闭包）：
-  - 注册 `shell.overlay`（根级浮层，全局可见）与 `conversation.composer.dock`（对话栏）两个槽位，
-    按位置设置只渲染其一；
-  - 每 2 秒 `host.call('snapshot')` 轮询；`userToken`/API Key 存于本机 `localStorage` 并推给 host，
-    host 从不把密钥回传页面（`getConfig` 只返回布尔事实）；
-  - 鲸鱼悬浮窗（仅官方 DeepSeek 鲸鱼图标）悬停 350ms 展开卡片，徽标与卡片共享悬停、
-    离开后 250ms 才收起（移向卡片不闪关）；卡片按视口可用空间朝空白方向展开并钳制尺寸；
-  - 展开卡片仅展示用量信息；右上角齿轮进入独立设置视图（显示位置 / 配置），
-    配置区 `?` 提供获取 `userToken` 的六步教程；未配置 Token 时显示醒目 CTA 引导。
-
-## 测试
+当前 GitHub-only 阶段推荐在 Harness Web profile 中安装：
 
 ```bash
-node test/host.test.mjs      # Host 半：解析聚合、余额、失败路径、RPC 边界
-node test/client.smoke.mjs   # Client 半：槽位注册、悬停展开/收起、位置切换、持久化
+cd ~/.dsh/profiles/web
+pnpm add github:JJLin131/deepseek-harness-usagePlugin
+node node_modules/dsh-usage-panel/scripts/cli.mjs install
+pnpm dsh web
 ```
 
-## 安装
+也可以直接调用随包发布的脚本：
 
-见 [install/INSTALL.md](install/INSTALL.md) —— 运行时安装到当前 DSH：
-`cordis_define`（参数见 `install/define-payload.json`）→ `cordis_run` → 页面批准 → 完成。
+```bash
+node node_modules/dsh-usage-panel/scripts/install.mjs
+```
 
-## 注意
+安装器会验证包确实位于当前 Web profile 的 `node_modules`，再安全更新 `cordis.patch.yml`。已有配置和其他插件不会被覆盖；发生修改时会在同目录创建带时间戳的备份。重复运行不会产生重复 entry。
 
-- 平台用量接口为控制台私有接口，可能变更；接口失败时面板显示错误但不会影响 DSH。
-- 费用估算（DSH 实时）按 DeepSeek 公开列表价，仅供参考；平台金额以平台接口为准。
-- `platform.deepseek.com` 的 `userToken` 会随登录态过期，过期后需重新获取。
+## npm 发布后的单命令安装
+
+包发布到 npm 后可从任意目录执行：
+
+```bash
+pnpm dlx dsh-usage-panel install
+```
+
+CLI 会在缺包时把当前版本安装到 `~/.dsh/profiles/web`，然后完成 profile 注册。若要指定 Git 或其他包规格：
+
+```bash
+pnpm dlx dsh-usage-panel install --package <package-spec>
+```
+
+## 升级
+
+GitHub 版本：
+
+```bash
+cd ~/.dsh/profiles/web
+pnpm update dsh-usage-panel
+node node_modules/dsh-usage-panel/scripts/cli.mjs install
+```
+
+更新后重启 `pnpm dsh web`。仓库提交了可运行的 `lib/index.js`、`lib/client.js` 及 source map，普通用户不需要运行构建命令。
+
+## 诊断
+
+```bash
+cd ~/.dsh/profiles/web
+node node_modules/dsh-usage-panel/scripts/cli.mjs doctor
+```
+
+`doctor` 只输出非敏感的安装事实，检查 profile、包名、loader entry、Host/Client 构建产物、client bundle ID 与旧版配置。它不会打印 Token、API Key 或配置内容，也不会删除检测到的旧开发 junction。
+
+## 卸载
+
+```bash
+cd ~/.dsh/profiles/web
+node node_modules/dsh-usage-panel/scripts/cli.mjs uninstall
+pnpm remove dsh-usage-panel
+```
+
+也可在包已从 profile 删除后运行：
+
+```bash
+pnpm dlx dsh-usage-panel uninstall
+```
+
+`uninstall` 只移除本插件的 loader entry，不删除其他配置或用户文件；重复执行是安全的。修改前同样会创建备份。
+
+## 配置与安全
+
+- `platform.deepseek.com` 的 `userToken` 与手工输入的 DeepSeek API Key 保存在浏览器 origin 的 localStorage 键 `dsh-usage.config` 中，以便重启浏览器后恢复。它们不会写入 `cordis.yml` 或 `cordis.patch.yml`。
+- Host 仅通过 RPC 接收设置，`snapshot` / `getConfig` 只返回是否配置、长度等非敏感事实，不回传密钥。
+- 若没有手工 API Key，Host 会尝试读取 Harness 的 `DEEPSEEK_API_KEY` credentials；credentials 服务不可用时余额功能降级为空，不影响面板其他功能。
+- 网络请求只把鉴权值放在 HTTPS Authorization header 中。错误日志不会输出请求头、Token、API Key 或远端响应正文。
+- DeepSeek 平台用量接口是控制台私有接口，平台变更时平台统计可能暂时不可用；本地 Session 统计与其他 Harness 功能不受影响。
+
+## 工作原理
+
+Host 入口 `lib/index.js` 以 `TypertRemoteService` 注册 `usage` 服务，并通过 `@Remote` 暴露：
+
+- `usage/snapshot`
+- `usage/getConfig`
+- `usage/setConfig`
+- `usage/resetLocal`
+- `usage/refresh`
+
+浏览器端把所有调用集中在 `src/client/usage-api.ts`，使用 Harness Connection 的兼容调用：
+
+```js
+connection.rpc.call('/api', 'usage/setConfig', {
+  args: { cfg }
+})
+```
+
+`lib/client.js` 加载时主动注册 `window.__ModuleLoader__.load({ id: 'dsh-usage-panel', ... })`。包名、loader name、bundle ID 与 `<style data-plugin>` 均统一为 `dsh-usage-panel`。
+
+## 开发
+
+```bash
+pnpm install
+pnpm build
+pnpm test
+pnpm typecheck
+pnpm test:package
+pnpm test:pack
+```
+
+`prepack` 会重新构建并检查发布产物。仓库仍直接提交 `lib/`，以保证 Git dependency 安装不依赖用户环境执行构建。
+
+若本机已安装 Harness rc.5，可运行 `pnpm test:compat:rc5` 使用其真实 Typert 包复测 Host；也可用 `DSH_RC5_NODE_MODULES` 指向其他 Harness `node_modules`。
+
+项目结构：
+
+```text
+src/index.ts               Host Usage Service
+src/client.ts              Usage Panel UI 与 Client 插件入口
+src/client/usage-api.ts    Connection RPC adapter
+scripts/                   install / uninstall / doctor / CLI
+lib/                       已构建的发布产物
+test/                      RPC、安装器、Host 与 package 验收测试
+```
+
+## 已知兼容性限制
+
+- 当前实现按 Harness `0.1.0-rc.5` 的 `connection.rpc.call('/api', endpoint, { args })`、Typert Gateway SRC fallback 和 `dsh.client` 模块加载规范验证。若 Harness 在后续正式版更改这些公开面，需要发布对应插件版本。
+- 安装或卸载后必须重启 Web 进程，因为 Harness 会缓存插件包元数据和 client graph。
+- 安装器只管理默认 Web profile；高级部署可用 `--profile <path>` 指定其他兼容 profile。
+
+除安装包并运行 install 命令外，不再需要手工修改 DeepSeek Harness。

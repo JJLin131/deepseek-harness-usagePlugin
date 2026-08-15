@@ -1,2 +1,0 @@
-# 构建产物与本地解析 junction（指向本机 harness/profiles，不入库）
-node_modules/

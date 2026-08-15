@@ -1,10 +1,10 @@
 /**
  * DeepSeek 用量面板 — 宿主半（静态 Cordis 插件，随 DSH 进程自动挂载）。
  *
- * 与动态版 plugin/host.js 逻辑一致，区别：
- *  1) 不依赖动态沙箱的 `harness.handle` —— 改为 `TypertRemoteService` + `@Remote`
- *     注册服务 `usage`，浏览器半经 `connection.api.usage.*` 调用（DSH 静态 web
- *     插件的标准 RPC 通路）。
+ * 当前发布版不依赖动态沙箱的 `harness.handle`：
+ *  1) 使用 `TypertRemoteService` + `@Remote`
+ *     注册服务 `usage`，浏览器半经 `connection.rpc.call('/api', 'usage/*', ... )`
+ *     调用，不依赖生成式 Client Remote contribution。
  *  2) 插件形态：包主入口 `export default` 一个继承 TypertRemoteService 的类；
  *     cordis 以 `new Plugin(ctx, config)` 实例化（fiber.js），构造器里
  *     `super(ctx, 'usage')` 注册服务，`[Service.init]`（构造后运行）里做
@@ -15,7 +15,7 @@
  *    （不是 dsh-api-remotes；后者只导出 agent-lookup 与 apply）。
  *  - TypertRemoteService 构造签名 `(ctx, serviceKey, options?)`：serviceKey 既是
  *    Cordis 服务键也是 Typert 默认 wire 命名空间，`super(ctx, 'usage')` 即
- *    `ctx.usage` + `connection.api.usage.*`。
+ *    `ctx.usage` + `usage/*` Gateway endpoint。
  *  - 类插件生命周期：fiber 构造 `new Plugin(ctx, config)` → `instance[Service.init]?.()`
  *    → fiber 卸载时自动释放构造/init 期间注册的 ctx.on / ctx.interval 效果。
  *  - 注入服务在构造/init 期间经 `this.ctx.<name>`（ctx 是带注入的代理）访问。
@@ -26,40 +26,16 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 
-// ---- 常量（与动态版一致）----
+// ---- 常量 ----
 const POLL_PLATFORM_MS = 60 * 1000
 const FETCH_TIMEOUT_MS = 30 * 1000
-const FETCH_MAX_STDOUT_BYTES = 8 * 1024 * 1024
 
 const DEEPSEEK_PLATFORM_BASE = 'https://platform.deepseek.com'
 const DEEPSEEK_API_BASE = 'https://api.deepseek.com'
 
 const DEFAULT_PRICE = { cacheHit: 0.07, cacheMiss: 0.27, output: 1.10 }
 
-// ---- 模块级状态（静态插件模块生命周期 = 进程内，重启 fiber 不重置，可接受）----
-let config = { token: '', apiKey: '' }
-let refreshing = false
-let refreshQueued = false
-
-const localAgg = { requests: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, since: Date.now() }
-// 'YYYY-MM-DD|HH' -> { requests, input, cacheHit, output }（DSH 会话小时桶）
-const localHours = new Map<string, { requests: number; input: number; cacheHit: number; output: number }>()
-
-let platformCache: unknown = null
-let balanceCache: unknown = null
-let errorCache: string | null = null
-let snapshot: unknown = null
-
 // ---- 最小本地类型（避免引入未核实的类型包）----
-interface ShellRunResult {
-  exitCode: number
-  stdout: { text: string }
-  stderr: { text: string }
-}
-interface ShellHandle {
-  resolve(req: unknown): unknown
-  run(spec: unknown): Promise<ShellRunResult>
-}
 interface CredentialsHandle {
   resolve(ref: string): Promise<{ value: string } | undefined>
 }
@@ -73,9 +49,33 @@ interface Agg {
   models: Record<string, { requests: number; cacheHit: number; cacheMiss: number; output: number; cost: number }>
 }
 
+interface LocalAgg {
+  requests: number
+  inputTokens: number
+  cacheReadTokens: number
+  outputTokens: number
+  since: number
+}
+
+interface UsageConfig {
+  token: string
+  apiKey: string
+}
+
+type LocalHours = Map<string, { requests: number; input: number; cacheHit: number; output: number }>
+
 // ---- 纯工具（无 ctx，模块级安全）----
 function pad2(n: number): string { return n < 10 ? '0' + n : '' + n }
-function errText(e: unknown): string { return String((e as Error)?.message ?? e).slice(0, 500) }
+function safeErrorText(e: unknown, secrets: readonly string[]): string {
+  let message = String((e as Error)?.message ?? e)
+  for (const secret of secrets) {
+    if (secret.length >= 4) message = message.split(secret).join('[REDACTED]')
+  }
+  return message
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/sk-[A-Za-z0-9_-]+/g, '[REDACTED]')
+    .slice(0, 500)
+}
 function localDateKey(d: Date): string {
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
 }
@@ -144,13 +144,13 @@ function aggToJson(agg: Agg) {
     byModel,
   }
 }
-function localEstimateUsd(): number {
+function localEstimateUsd(localAgg: LocalAgg): number {
   const p = DEFAULT_PRICE
   return (localAgg.cacheReadTokens / 1e6) * p.cacheHit
     + (localAgg.inputTokens / 1e6) * p.cacheMiss
     + (localAgg.outputTokens / 1e6) * p.output
 }
-function localToJson() {
+function localToJson(localAgg: LocalAgg, localHours: LocalHours) {
   const floor = hourKeyAt(Date.now() - 48 * 3600 * 1000)
   const hours = Array.from(localHours.entries())
     .filter((pair) => pair[0] >= floor)
@@ -172,12 +172,12 @@ function localToJson() {
     cacheReadTokens: localAgg.cacheReadTokens,
     cacheMissTokens: localAgg.inputTokens,
     outputTokens: localAgg.outputTokens,
-    estimatedCostUsd: Math.round(localEstimateUsd() * 10000) / 10000,
+    estimatedCostUsd: Math.round(localEstimateUsd(localAgg) * 10000) / 10000,
     since: localAgg.since,
     hours,
   }
 }
-function configFacts() {
+function configFacts(config: UsageConfig) {
   return {
     hasToken: !!config.token,
     hasApiKey: !!config.apiKey,
@@ -186,32 +186,39 @@ function configFacts() {
     apiKeyLength: config.apiKey ? config.apiKey.length : 0,
   }
 }
-function publish() {
-  snapshot = {
-    platform: platformCache,
-    local: localToJson(),
-    balance: balanceCache,
-    config: configFacts(),
-    lastUpdated: Date.now(),
-    error: errorCache,
+function parseJsonResponse(text: string, label: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(label + ' 返回了无效 JSON')
   }
-  return snapshot
 }
 
-// ---- Remote 服务：浏览器半通过 connection.api.usage.* 调用 ----
+// ---- Remote 服务：浏览器半通过 usage/* Gateway endpoint 调用 ----
 export class UsageService extends TypertRemoteService {
-  static inject = ['shell', 'credentials', 'timer']
+  static inject = ['timer']
+
+  private config: UsageConfig = { token: '', apiKey: '' }
+  private refreshing = false
+  private refreshQueued = false
+  private readonly localAgg: LocalAgg = {
+    requests: 0,
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    outputTokens: 0,
+    since: Date.now(),
+  }
+  private readonly localHours: LocalHours = new Map()
+  private platformCache: unknown = null
+  private balanceCache: unknown = null
+  private errorCache: string | null = null
 
   constructor(ctx: Context, _config: unknown) {
     super(ctx, 'usage')
   }
 
-  /** 注入服务（static inject）经 this.ctx 访问（类插件契约）。 */
-  private get shellApi(): ShellHandle {
-    return (this.ctx as unknown as { shell: ShellHandle }).shell
-  }
-  private get credentialsApi(): CredentialsHandle {
-    return (this.ctx as unknown as { credentials: CredentialsHandle }).credentials
+  private get credentialsApi(): CredentialsHandle | undefined {
+    return this.ctx.get('credentials') as CredentialsHandle | undefined
   }
   private get timerCtx(): { interval(fn: () => void, ms: number): unknown } {
     return this.ctx as unknown as { interval(fn: () => void, ms: number): unknown }
@@ -221,33 +228,32 @@ export class UsageService extends TypertRemoteService {
     return this.ctx as unknown as { on(event: string, fn: (...args: unknown[]) => void): unknown }
   }
 
-  private NODE_FETCH_E =
-    'node -e "const r=JSON.parse(process.env.DSHUP_REQ);'
-    + 'const h=Object.assign({accept:\'application/json\'},r.headers||{});'
-    + 'fetch(r.url,{method:r.method||\'GET\',headers:h})'
-    + '.then(async x=>{const t=await x.text();if(!x.ok){console.error(\'HTTP \'+x.status+\' \'+t.slice(0,400));process.exitCode=1}else{process.stdout.write(t)}})'
-    + '.catch(e=>{console.error(\'NET \'+String(e&&e.message||e));process.exitCode=2})"'
-
   private async httpGet(url: string, bearer?: string): Promise<string> {
-    const req = { url, headers: bearer ? { Authorization: 'Bearer ' + bearer } : {} }
-    const result = await this.shellApi.run(this.shellApi.resolve({
-      command: this.NODE_FETCH_E,
-      env: { DSHUP_REQ: JSON.stringify(req) },
-      timeoutMs: FETCH_TIMEOUT_MS,
-      stdoutMaxBytes: FETCH_MAX_STDOUT_BYTES,
-    }))
-    if (result.exitCode !== 0) {
-      const detail = result.stderr && result.stderr.text ? result.stderr.text.trim().slice(0, 300) : ''
-      throw new Error('HTTP ' + url + ' failed (exit ' + result.exitCode + ')' + (detail ? ': ' + detail : ''))
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, {
+        headers: {
+          accept: 'application/json',
+          ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+        },
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status} for ${new URL(url).pathname}`)
+      const text = await response.text()
+      if (text.length === 0) throw new Error(`HTTP response was empty for ${new URL(url).pathname}`)
+      return text
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error(`HTTP request timed out for ${new URL(url).pathname}`)
+      throw error
+    } finally {
+      clearTimeout(timeout)
     }
-    const text = result.stdout && result.stdout.text ? result.stdout.text : ''
-    if (text.length === 0) throw new Error('HTTP ' + url + ' returned an empty body')
-    return text
   }
 
   private assertPlatformOk(j: { code?: number; msg?: string; message?: string }, label: string): void {
     if (j && typeof j.code === 'number' && j.code !== 0) {
-      throw new Error(label + ' 平台返回 code=' + j.code + (j.msg || j.message ? ': ' + (j.msg || j.message) : ''))
+      throw new Error(label + ' 平台返回 code=' + j.code)
     }
   }
 
@@ -259,11 +265,11 @@ export class UsageService extends TypertRemoteService {
       this.httpGet(DEEPSEEK_PLATFORM_BASE + '/api/v0/usage/amount?month=' + month + '&year=' + year, token),
       this.httpGet(DEEPSEEK_PLATFORM_BASE + '/api/v0/usage/cost?month=' + month + '&year=' + year, token),
     ])
-    const amt = JSON.parse(amountText) as {
+    const amt = parseJsonResponse(amountText, 'usage/amount') as {
       code?: number
       data?: { biz_data?: { total?: unknown; days?: Array<{ date: string; data?: unknown }> } }
     }
-    const cst = JSON.parse(costText) as {
+    const cst = parseJsonResponse(costText, 'usage/cost') as {
       code?: number
       data?: { biz_data?: Array<{ total?: unknown; days?: Array<{ date: string; data?: unknown }>; currency?: string }> }
     }
@@ -330,17 +336,20 @@ export class UsageService extends TypertRemoteService {
   }
 
   private async fetchBalance() {
-    let key = config.apiKey || ''
+    let key = this.config.apiKey || ''
     let source = 'user'
     if (!key) {
       try {
-        const cred = await this.credentialsApi.resolve('DEEPSEEK_API_KEY')
+        const cred = await this.credentialsApi?.resolve('DEEPSEEK_API_KEY')
         if (cred?.value) { key = cred.value; source = 'credentials' }
       } catch { /* 忽略 */ }
     }
-    if (!key && config.token) { key = config.token; source = 'token' }
+    if (!key && this.config.token) { key = this.config.token; source = 'token' }
     if (!key) return null
-    const j = JSON.parse(await this.httpGet(DEEPSEEK_API_BASE + '/user/balance', key)) as {
+    const j = parseJsonResponse(
+      await this.httpGet(DEEPSEEK_API_BASE + '/user/balance', key),
+      'user/balance',
+    ) as {
       is_available?: boolean
       balance_infos?: Array<{ currency?: string; total_balance?: string; granted_balance?: string; topped_up_balance?: string }>
     }
@@ -357,54 +366,64 @@ export class UsageService extends TypertRemoteService {
   }
 
   private async refresh(): Promise<void> {
-    if (refreshing) { refreshQueued = true; return }
-    refreshing = true
+    if (this.refreshing) { this.refreshQueued = true; return }
+    this.refreshing = true
     try {
-      if (config.token) {
+      if (this.config.token) {
         try {
-          platformCache = await this.fetchPlatform(config.token)
-          errorCache = null
+          this.platformCache = await this.fetchPlatform(this.config.token)
+          this.errorCache = null
         } catch (e) {
-          platformCache = null
-          errorCache = '平台用量获取失败: ' + errText(e)
+          this.platformCache = null
+          this.errorCache = '平台用量获取失败: ' + safeErrorText(e, [this.config.token, this.config.apiKey])
         }
       } else {
-        platformCache = null
-        errorCache = '未配置平台 Token：展开面板粘贴 platform.deepseek.com 的 userToken 后可显示平台用量与金额'
+        this.platformCache = null
+        this.errorCache = '未配置平台 Token：展开面板粘贴 platform.deepseek.com 的 userToken 后可显示平台用量与金额'
       }
       try {
-        balanceCache = await this.fetchBalance()
-      } catch { balanceCache = null }
+        this.balanceCache = await this.fetchBalance()
+      } catch {
+        this.balanceCache = null
+      }
     } catch (e) {
-      errorCache = '刷新失败: ' + errText(e)
+      this.errorCache = '刷新失败: ' + safeErrorText(e, [this.config.token, this.config.apiKey])
     } finally {
-      refreshing = false
-      publish()
-      if (refreshQueued) { refreshQueued = false; void this.refresh() }
+      this.refreshing = false
+      if (this.refreshQueued) { this.refreshQueued = false; void this.refresh() }
     }
   }
 
-  // ---- Remote 方法（浏览器半经 connection.api.usage.* 调用）----
-  @Remote('snapshot') snapshot(): unknown { return publish() }
-  @Remote('getConfig') getConfig(): unknown { return configFacts() }
+  private publish(): unknown {
+    return {
+      platform: this.platformCache,
+      local: localToJson(this.localAgg, this.localHours),
+      balance: this.balanceCache,
+      config: configFacts(this.config),
+      lastUpdated: Date.now(),
+      error: this.errorCache,
+    }
+  }
+
+  // ---- Remote 方法（浏览器半经 connection.rpc.call 调用）----
+  @Remote('snapshot') snapshot(): unknown { return this.publish() }
+  @Remote('getConfig') getConfig(): unknown { return configFacts(this.config) }
   @Remote('setConfig') setConfig(cfg: { token?: string; apiKey?: string }): { ok: boolean } {
-    config = {
+    this.config = {
       token: typeof cfg?.token === 'string' ? cfg.token.trim() : '',
       apiKey: typeof cfg?.apiKey === 'string' ? cfg.apiKey.trim() : '',
     }
-    errorCache = null
-    publish()
+    this.errorCache = null
     void this.refresh()
     return { ok: true }
   }
   @Remote('resetLocal') resetLocal(): { ok: boolean } {
-    localAgg.requests = 0
-    localAgg.inputTokens = 0
-    localAgg.cacheReadTokens = 0
-    localAgg.outputTokens = 0
-    localAgg.since = Date.now()
-    localHours.clear()
-    publish()
+    this.localAgg.requests = 0
+    this.localAgg.inputTokens = 0
+    this.localAgg.cacheReadTokens = 0
+    this.localAgg.outputTokens = 0
+    this.localAgg.since = Date.now()
+    this.localHours.clear()
     return { ok: true }
   }
   @Remote('refresh') refreshRemote(): { ok: boolean } { void this.refresh(); return { ok: true } }
@@ -417,27 +436,25 @@ export class UsageService extends TypertRemoteService {
         const event = rawEvent as { type?: string; data?: { usage?: { inputTokens?: number; cacheReadTokens?: number; outputTokens?: number } } }
         if (!event || event.type !== 'assistant/message') return
         const u = event.data?.usage
-        localAgg.requests += 1
+        this.localAgg.requests += 1
         const input = u?.inputTokens || 0
         const cacheHit = u?.cacheReadTokens || 0
         const output = u?.outputTokens || 0
-        localAgg.inputTokens += input
-        localAgg.cacheReadTokens += cacheHit
-        localAgg.outputTokens += output
+        this.localAgg.inputTokens += input
+        this.localAgg.cacheReadTokens += cacheHit
+        this.localAgg.outputTokens += output
         const hk = hourKeyOf(new Date())
-        let b = localHours.get(hk)
-        if (!b) { b = { requests: 0, input: 0, cacheHit: 0, output: 0 }; localHours.set(hk, b) }
+        let b = this.localHours.get(hk)
+        if (!b) { b = { requests: 0, input: 0, cacheHit: 0, output: 0 }; this.localHours.set(hk, b) }
         b.requests += 1
         b.input += input
         b.cacheHit += cacheHit
         b.output += output
-        publish()
-      } catch (e) {
-        console.error('usage aggregation failed:', e)
+      } catch {
+        console.error('dsh-usage-panel: usage aggregation failed')
       }
     })
 
-    publish()
     this.timerCtx.interval(() => { void this.refresh() }, POLL_PLATFORM_MS)
     void this.refresh()
   }

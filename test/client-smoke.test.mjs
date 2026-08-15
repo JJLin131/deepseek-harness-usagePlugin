@@ -39,10 +39,10 @@ test('built client registers, polls through RPC and mounts both UI slots', async
   const hooks = new Map()
   let currentComponent = ''
   let hookCursor = 0
-  const render = component => {
+  const render = (component, props) => {
     currentComponent = component.name
     hookCursor = 0
-    return component()
+    return component(props)
   }
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
@@ -78,16 +78,7 @@ test('built client registers, polls through RPC and mounts both UI slots', async
           call: async (channel, endpoint, payload) => {
             calls.push({ channel, endpoint, payload })
             if (endpoint === 'usage/snapshot') {
-              return {
-                ok: true,
-                value: {
-                  platform: null,
-                  local: { requests: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, hours: [] },
-                  balance: null,
-                  config: { hasToken: true, hasApiKey: false, tokenLength: 11, apiKeyLength: 0 },
-                  error: null,
-                },
-              }
+              return { ok: false, error: { code: 'host-not-ready' } }
             }
             if (endpoint === 'usage/getConfig') {
               return { ok: true, value: { hasToken: configHasToken, hasApiKey: false, tokenLength: configHasToken ? 11 : 0, apiKeyLength: 0 } }
@@ -134,6 +125,9 @@ test('built client registers, polls through RPC and mounts both UI slots', async
   flushWindowTimers()
   const expandedFloat = render(Float)
   assert.equal(cardPresent(expandedFloat), true)
+  const detail = flatChildren(expandedFloat).find(node => node.type?.name === 'Detail')
+  assert.ok(detail)
+  assert.doesNotThrow(() => render(detail.type, detail.props))
   expandedFloat.props.onMouseLeave()
   assert.equal(cardPresent(render(Float)), true)
   flushWindowTimers()

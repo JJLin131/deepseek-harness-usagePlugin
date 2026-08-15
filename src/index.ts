@@ -2,29 +2,22 @@
  * DeepSeek 用量面板 — 宿主半（静态 Cordis 插件，随 DSH 进程自动挂载）。
  *
  * 当前发布版不依赖动态沙箱的 `harness.handle`：
- *  1) 使用 `TypertRemoteService` + `@Remote`
- *     注册服务 `usage`，浏览器半经 `connection.rpc.call('/api', 'usage/*', ... )`
- *     调用，不依赖生成式 Client Remote contribution。
- *  2) 插件形态：包主入口 `export default` 一个继承 TypertRemoteService 的类；
- *     cordis 以 `new Plugin(ctx, config)` 实例化（fiber.js），构造器里
- *     `super(ctx, 'usage')` 注册服务，`[Service.init]`（构造后运行）里做
- *     订阅/轮询等启动逻辑；`static inject` 声明的服务经 `this.ctx.<name>` 访问。
+ *  1) 在 Harness Connection 的 `/api` channel 上直接认领 `usage/*`，浏览器半经
+ *     `connection.rpc.call('/api', 'usage/*', ...)` 调用。这里不使用模块私有的
+ *     `@Remote` marker，因而同时兼容 npm 构建版与 `tsx` 源码 checkout。
+ *  2) 插件形态：包主入口 `export default` 一个 Cordis Service 类；cordis 以
+ *     `new Plugin(ctx, config)` 实例化，在 `[Service.init]` 中注册 RPC、事件与轮询。
  *
  * 已核实的部署事实（profiles/node_modules 内装版本）：
- *  - `TypertRemoteService` / `Remote` 来自 `@deepseek-ai/dsh-typert-protocol`
- *    （不是 dsh-api-remotes；后者只导出 agent-lookup 与 apply）。
- *  - TypertRemoteService 构造签名 `(ctx, serviceKey, options?)`：serviceKey 既是
- *    Cordis 服务键也是 Typert 默认 wire 命名空间，`super(ctx, 'usage')` 即
- *    `ctx.usage` + `usage/*` Gateway endpoint。
  *  - 类插件生命周期：fiber 构造 `new Plugin(ctx, config)` → `instance[Service.init]?.()`
  *    → fiber 卸载时自动释放构造/init 期间注册的 ctx.on / ctx.interval 效果。
- *  - 注入服务在构造/init 期间经 `this.ctx.<name>`（ctx 是带注入的代理）访问。
+ *  - Host Web composition 提供 `connection`；RPC interceptor 的 disposer 由调用时的
+ *    Cordis fiber 自动认领，插件卸载时同步撤销。
  *
  * 对外 Remote 方法：snapshot / getConfig / setConfig / resetLocal / refresh。
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
-import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 
 // ---- 常量 ----
 const POLL_PLATFORM_MS = 60 * 1000
@@ -63,6 +56,33 @@ interface UsageConfig {
 }
 
 type LocalHours = Map<string, { requests: number; input: number; cacheHit: number; output: number }>
+
+interface RpcFailure {
+  readonly code: string
+  readonly message: string
+  readonly details: Readonly<Record<string, never>>
+}
+
+type RpcResult =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly error: RpcFailure }
+
+interface ConnectionRpcHost {
+  intercept(
+    channel: string,
+    claims: (endpoint: string) => boolean,
+    dispatch: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<RpcResult>,
+    options: { readonly authority: 'trusted-host' },
+  ): unknown
+}
+
+interface ConnectionHandle {
+  readonly rpc: ConnectionRpcHost
+}
+
+const RPC_CHANNEL = '/api'
+const RPC_NAMESPACE = 'usage'
+const RPC_METHODS = new Set(['snapshot', 'getConfig', 'setConfig', 'resetLocal', 'refresh'])
 
 // ---- 纯工具（无 ctx，模块级安全）----
 function pad2(n: number): string { return n < 10 ? '0' + n : '' + n }
@@ -194,9 +214,9 @@ function parseJsonResponse(text: string, label: string): unknown {
   }
 }
 
-// ---- Remote 服务：浏览器半通过 usage/* Gateway endpoint 调用 ----
-export class UsageService extends TypertRemoteService {
-  static inject = ['timer']
+// ---- Host 服务：浏览器半通过 Connection RPC 的 usage/* endpoint 调用 ----
+export class UsageService extends Service {
+  static inject = ['connection']
 
   private config: UsageConfig = { token: '', apiKey: '' }
   private refreshing = false
@@ -214,14 +234,18 @@ export class UsageService extends TypertRemoteService {
   private errorCache: string | null = null
 
   constructor(ctx: Context, _config: unknown) {
-    super(ctx, 'usage')
+    super(ctx, RPC_NAMESPACE)
   }
 
   private get credentialsApi(): CredentialsHandle | undefined {
     return this.ctx.get('credentials') as CredentialsHandle | undefined
   }
-  private get timerCtx(): { interval(fn: () => void, ms: number): unknown } {
-    return this.ctx as unknown as { interval(fn: () => void, ms: number): unknown }
+  private get connectionApi(): ConnectionHandle {
+    const connection = this.ctx.get('connection') as ConnectionHandle | undefined
+    if (connection?.rpc?.intercept === undefined) {
+      throw new Error('dsh-usage-panel: Host connection RPC service is unavailable')
+    }
+    return connection
   }
   /** 'session/event' 不在 cordis 基础 Events 映射内（由 dsh-session 类型增强声明），断言放宽类型。 */
   private get eventCtx(): { on(event: string, fn: (...args: unknown[]) => void): unknown } {
@@ -405,10 +429,10 @@ export class UsageService extends TypertRemoteService {
     }
   }
 
-  // ---- Remote 方法（浏览器半经 connection.rpc.call 调用）----
-  @Remote('snapshot') snapshot(): unknown { return this.publish() }
-  @Remote('getConfig') getConfig(): unknown { return configFacts(this.config) }
-  @Remote('setConfig') setConfig(cfg: { token?: string; apiKey?: string }): { ok: boolean } {
+  // ---- RPC 业务方法（浏览器半经 connection.rpc.call 调用）----
+  snapshot(): unknown { return this.publish() }
+  getConfig(): unknown { return configFacts(this.config) }
+  setConfig(cfg: { token?: string; apiKey?: string }): { ok: boolean } {
     this.config = {
       token: typeof cfg?.token === 'string' ? cfg.token.trim() : '',
       apiKey: typeof cfg?.apiKey === 'string' ? cfg.apiKey.trim() : '',
@@ -417,7 +441,7 @@ export class UsageService extends TypertRemoteService {
     void this.refresh()
     return { ok: true }
   }
-  @Remote('resetLocal') resetLocal(): { ok: boolean } {
+  resetLocal(): { ok: boolean } {
     this.localAgg.requests = 0
     this.localAgg.inputTokens = 0
     this.localAgg.cacheReadTokens = 0
@@ -426,10 +450,48 @@ export class UsageService extends TypertRemoteService {
     this.localHours.clear()
     return { ok: true }
   }
-  @Remote('refresh') refreshRemote(): { ok: boolean } { void this.refresh(); return { ok: true } }
+  refreshRemote(): { ok: boolean } { void this.refresh(); return { ok: true } }
+
+  private async dispatchRpc(endpoint: string, payload: unknown): Promise<RpcResult> {
+    try {
+      if (!isPlainRecord(payload) || !isPlainRecord(payload.args)) return rpcInvalid()
+      const method = endpoint.slice(RPC_NAMESPACE.length + 1)
+      if (method === 'snapshot' && hasExactKeys(payload.args, [])) {
+        return { ok: true, value: this.snapshot() }
+      }
+      if (method === 'getConfig' && hasExactKeys(payload.args, [])) {
+        return { ok: true, value: this.getConfig() }
+      }
+      if (method === 'setConfig' && hasExactKeys(payload.args, ['cfg']) && isPlainRecord(payload.args.cfg)) {
+        return { ok: true, value: this.setConfig(payload.args.cfg) }
+      }
+      if (method === 'resetLocal' && hasExactKeys(payload.args, [])) {
+        return { ok: true, value: this.resetLocal() }
+      }
+      if (method === 'refresh' && hasExactKeys(payload.args, [])) {
+        return { ok: true, value: this.refreshRemote() }
+      }
+      return rpcInvalid()
+    } catch {
+      return {
+        ok: false,
+        error: { code: 'internal', message: 'dsh-usage-panel: RPC 处理失败', details: {} },
+      }
+    }
+  }
 
   // ---- 启动逻辑：构造后由 fiber 调用（ctx.on/ctx.interval 随 fiber 释放）----
   protected [Service.init](): void {
+    this.connectionApi.rpc.intercept(
+      RPC_CHANNEL,
+      endpoint => {
+        const prefix = `${RPC_NAMESPACE}/`
+        return endpoint.startsWith(prefix) && RPC_METHODS.has(endpoint.slice(prefix.length))
+      },
+      (endpoint, payload) => this.dispatchRpc(endpoint, payload),
+      { authority: 'trusted-host' },
+    )
+
     // DSH 本会话实时用量：事件是 { type, seq, time, data }，TokenUsage 在 event.data.usage
     this.eventCtx.on('session/event', (_session, rawEvent) => {
       try {
@@ -455,8 +517,30 @@ export class UsageService extends TypertRemoteService {
       }
     })
 
-    this.timerCtx.interval(() => { void this.refresh() }, POLL_PLATFORM_MS)
+    this.ctx.effect(() => {
+      const timer = setInterval(() => { void this.refresh() }, POLL_PLATFORM_MS)
+      return () => clearInterval(timer)
+    }, 'dsh-usage-panel.platform-poll')
     void this.refresh()
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value) as object | null
+  return prototype === Object.prototype || prototype === null
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort()
+  const sortedExpected = [...expected].sort()
+  return keys.length === sortedExpected.length && keys.every((key, index) => key === sortedExpected[index])
+}
+
+function rpcInvalid(): RpcResult {
+  return {
+    ok: false,
+    error: { code: 'invalid-request', message: 'dsh-usage-panel: RPC 参数无效', details: {} },
   }
 }
 

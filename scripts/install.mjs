@@ -37,7 +37,7 @@ if (isMain()) {
       : `dsh-usage-panel 已注册，无需修改：${result.profileDir}`)
     if (result.backupPath) console.log(`原配置备份：${result.backupPath}`)
     for (const legacy of result.legacyLinks) {
-      console.warn(`检测到旧开发安装，未自动删除：${legacy.path}`)
+      console.warn(`检测到会抢先加载的旧开发安装，请先移除并重启 Harness：${legacy.path}`)
     }
     console.log('请重启 pnpm dsh web 使插件清单生效。')
   }).catch((error) => {

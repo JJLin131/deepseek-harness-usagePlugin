@@ -652,7 +652,7 @@ function Detail(props) {
     // ---- meta ----
     rows.push(React.createElement('div', { key: 'meta', className: 'dshup-meta' },
       React.createElement(IconClock, null),
-      React.createElement('span', null, '更新于 ' + fmtTime(data.lastUpdated)),
+      React.createElement('span', null, '更新于 ' + fmtTime(data && data.lastUpdated)),
       data && data.error ? React.createElement('span', { className: 'dshup-err' }, data.error) : null))
   }
 

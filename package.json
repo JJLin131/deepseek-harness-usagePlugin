@@ -1,6 +1,6 @@
 {
   "name": "dsh-usage-panel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DeepSeek Harness 用量面板：平台用量、余额与本地会话 Token 统计",
   "type": "module",
   "main": "./lib/index.js",
@@ -64,12 +64,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.5 <0.2.0",
     "react": "^18.3.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.5",
     "react": "^18.3.1",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3"

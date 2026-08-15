@@ -80,7 +80,9 @@ async function main() {
     const result = await install({ profileDir })
     console.log(result.changed ? '安装完成；loader entry 已写入。' : '安装已是最新状态，无需重复写入。')
     if (result.backupPath) console.log(`原配置备份：${result.backupPath}`)
-    for (const legacy of result.legacyLinks) console.warn(`旧开发安装未删除：${legacy.path}`)
+    for (const legacy of result.legacyLinks) {
+      console.warn(`旧开发安装会抢先于 profile 包加载，请先移除并重启 Harness：${legacy.path}`)
+    }
     console.log('请重启 pnpm dsh web。')
     return
   }

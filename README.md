@@ -58,10 +58,10 @@ node node_modules/dsh-usage-panel/scripts/install.mjs
 如果安装后没有看到鲸鱼按钮，先重启 `pnpm dsh web`，再运行：
 
 ```bash
-node node_modules/dsh-usage-panel/scripts/cli.mjs doctor
+node "$HOME/.dsh/profiles/web/node_modules/dsh-usage-panel/scripts/cli.mjs" doctor
 ```
 
-`doctor` 中所有项目均应显示 `PASS`；若仍有问题，请保留输出用于排查，但不要公开粘贴 Token 或 API Key。
+上面的命令可以从任意目录运行；不要在 Harness 仓库根目录直接使用相对路径 `node_modules/dsh-usage-panel/...`，因为插件安装在 Web profile 而不是 Harness 仓库中。`doctor` 中所有项目均应显示 `PASS`；若仍有问题，请保留输出用于排查，但不要公开粘贴 Token 或 API Key。
 
 ## npm 发布后的单命令安装
 
@@ -92,11 +92,18 @@ node node_modules/dsh-usage-panel/scripts/cli.mjs install
 ## 诊断
 
 ```bash
-cd ~/.dsh/profiles/web
-node node_modules/dsh-usage-panel/scripts/cli.mjs doctor
+node "$HOME/.dsh/profiles/web/node_modules/dsh-usage-panel/scripts/cli.mjs" doctor
 ```
 
 `doctor` 只输出非敏感的安装事实，检查 profile、包名、loader entry、Host/Client 构建产物、client bundle ID 与旧版配置。它不会打印 Token、API Key 或配置内容，也不会删除检测到的旧开发 junction。
+
+如果 `doctor` 明确报告 `legacy development junction ... (link)`，这个旧开发链接可能会优先于 Web profile 中的正式包。先停止 Harness，然后只移除报告中的链接；Windows 默认 profile 可执行：
+
+```bash
+cmd.exe /d /c rmdir "%USERPROFILE%\.dsh\profiles\node_modules\dsh-usage-panel"
+```
+
+不要添加 `/s`，也不要删除链接所指向的源码目录。移除后重新运行 `doctor`，确认全部 `PASS`，再启动 `pnpm dsh web`。
 
 ## 卸载
 
@@ -124,7 +131,7 @@ pnpm dlx dsh-usage-panel uninstall
 
 ## 工作原理
 
-Host 入口 `lib/index.js` 以 `TypertRemoteService` 注册 `usage` 服务，并通过 `@Remote` 暴露：
+Host 入口 `lib/index.js` 注册 Cordis `usage` 服务，并在 Harness Connection 的 `/api` channel 上直接认领：
 
 - `usage/snapshot`
 - `usage/getConfig`
@@ -141,6 +148,8 @@ connection.rpc.call('/api', 'usage/setConfig', {
 ```
 
 `lib/client.js` 加载时主动注册 `window.__ModuleLoader__.load({ id: 'dsh-usage-panel', ... })`。包名、loader name、bundle ID 与 `<style data-plugin>` 均统一为 `dsh-usage-panel`。
+
+Host 不依赖 `@Remote` 装饰器的模块私有 marker，因此在 npm 构建版 Harness 和通过 `node --import tsx/esm` 运行的源码 checkout 中都能注册同一组 RPC。
 
 ## 开发
 

@@ -77,7 +77,7 @@ export async function doctor({ profileDir } = {}) {
     checks.push({
       name: 'legacy development junction',
       ok: false,
-      detail: `${legacy.path}${legacy.link ? ' (link)' : ''}；doctor 不会删除它`,
+      detail: `${legacy.path}${legacy.link ? ' (link)' : ''}；它可能抢先于 profile 包加载，请移除后重启 Harness（doctor 不会删除）`,
     })
   }
 

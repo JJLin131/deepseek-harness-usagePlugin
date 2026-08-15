@@ -36,6 +36,33 @@ node node_modules/dsh-usage-panel/scripts/install.mjs
 
 安装器会验证包确实位于当前 Web profile 的 `node_modules`，再安全更新 `cordis.patch.yml`。已有配置和其他插件不会被覆盖；发生修改时会在同目录创建带时间戳的备份。重复运行不会产生重复 entry。
 
+## 安装后的使用方式
+
+1. 在 Harness Web profile 中启动 Web 界面：
+
+   ```bash
+   cd ~/.dsh/profiles/web
+   pnpm dsh web
+   ```
+
+2. 打开终端输出的 Web 地址。页面右下角会出现 DeepSeek 鲸鱼按钮；悬停约 350 毫秒或单击按钮即可展开用量面板，按住按钮可以拖动位置。
+3. 首次使用时打开面板右上角的设置：
+
+   - 不配置任何密钥时，仍可查看当前 DSH 进程内的 Session 请求数和 Token 估算。
+   - 若要查看 DeepSeek 平台的今日、昨日、本周和本月用量，请填写 `platform.deepseek.com` 的 `userToken`。
+   - DeepSeek API Key 是可选项，仅用于查询账户余额；留空时插件会尝试使用 Harness 的 `DEEPSEEK_API_KEY` credentials。
+
+4. 获取 `userToken`：登录 `platform.deepseek.com`，打开浏览器开发者工具，进入 **Application → Local Storage → platform.deepseek.com**，复制 `userToken` 字段的值，粘贴到面板后点击“保存并刷新”。面板内的 `?` 按钮也提供相同步骤。
+5. 设置页可以将面板切换为“悬浮窗”或“输入框下方”。面板支持立即刷新、清零本次 Host 进程内的本地统计，以及按时间范围查看平台数据。
+
+如果安装后没有看到鲸鱼按钮，先重启 `pnpm dsh web`，再运行：
+
+```bash
+node node_modules/dsh-usage-panel/scripts/cli.mjs doctor
+```
+
+`doctor` 中所有项目均应显示 `PASS`；若仍有问题，请保留输出用于排查，但不要公开粘贴 Token 或 API Key。
+
 ## npm 发布后的单命令安装
 
 包发布到 npm 后可从任意目录执行：

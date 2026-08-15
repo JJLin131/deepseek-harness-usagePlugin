@@ -2,6 +2,12 @@
 
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 界面的第三方用量面板。安装后随 `pnpm dsh web` 自动加载，不需要修改 Harness 源码、手写 YAML、创建 junction/symlink 或重新打包 client。
 
+## 项目截图
+- 支持任意位置拖动的悬浮窗
+<img width="547" height="328" alt="image" src="https://github.com/user-attachments/assets/cd2f4076-06b8-4631-ac5a-4613a197ab11" />
+<img width="1101" height="1567" alt="image" src="https://github.com/user-attachments/assets/69cfe474-6cc1-4067-9c5b-7175c1e0d18d" />
+
+
 ## 功能
 
 - 悬浮鲸鱼按钮，可拖动并记住位置，也可切换到输入框下方的 dock 模式
